@@ -1,6 +1,6 @@
 # 控件层级规则（容器 → 子内容矩阵，双源实证）
 
-> 2026-09-08 沛哥要求「控件层级问题检讨」产出。**方法**：扫描 86 个真实 json（`projects/SampleUI-New/ui/1024x600` 42 + `projects/LearningProject/basedemo-new_z20_1024_600` 35 demo/44，ftu unpack 反解），统计每个容器类型的直接子内容分布——**零越界样例**，基线全绿。
+> 2026-09-08 产出。**方法**：扫描 86 个真实 json（新 IDE 全量序列化工程 42 + 35 个官方 Demo/44，ftu unpack 反解），统计每个容器类型的直接子内容分布——**零越界样例**，基线全绿。
 > **落地**：check_all.py #2 层级合法性检查（_layer_problems）自动校验；html2json 嵌套栈生成天然合规。
 > 检索词：控件层级/嵌套/容器/父子/结构键/subItem/radiobuttons/页面 window。
 

@@ -1,8 +1,8 @@
 # ⚙️ package.properties / EasyUI.cfg 工程配置机制（屏幕旋转等）
 
-> 2026-09-03 沛哥讲解机制（定规）+ mark_cv201 实测校准（CV201_PND rotateScreen 270 / CV201_PND_1024_600 不转，同代码双屏方向适配案例）。
+> 2026-09-03 实测校准（1600×600 竖装屏 rotateScreen 270 / 横装屏不转，同代码双屏方向适配案例）。
 
-## 核心机制（沛哥 2026-09-03 定规）
+## 核心机制（2026-09-03 定规）
 
 1. **编译工具会自动生成完整的 EasyUI.cfg**（默认 JSON，包含下方字段表中的全部参数，路径分 debug=/mnt/extsd 与 release=/res 两套）
 2. 工程根目录 `package.properties` 里的 **`EasyUI.cfg={...}` 是覆盖层**：写了哪个字段就**优先采用**哪个（覆盖编译默认值）；**不需要特殊处理的字段不用写**
@@ -46,33 +46,32 @@
 | `touchDev` | string | 触摸设备节点 |
 | `uart` | string | 串口设备名（ttyS1） |
 | `zkdebug` | bool | 调试开关 |
-| `watchDogEnable` | bool | 看门狗开关（F133 工程普遍 false，mark_cv201 也配 false）——完整默认以编译工具生成为准，需要改才在 package.properties 覆盖 |
+| `watchDogEnable` | bool | 看门狗开关（F133 工程普遍 false）——完整默认以编译工具生成为准，需要改才在 package.properties 覆盖 |
 
 ## ⚠️ 何时用 package.properties 覆盖（沛哥 2026-09-03 补充定规）
 
 - **正常情况（屏幕与触摸方向一致 / 都不转）→ 发 IDE 配置 .prefs 即可，不用写 package.properties**
 - **需要特殊处理覆盖时才用 package.properties**：典型场景 = **某些硬件屏幕需要旋转、而触摸不需要旋转**
   （两者方向不一致），这时只覆盖 rotateScreen 写旋转值，rotateTouch 不写/保持默认，触摸坐标不跟着转
-  —— mark_cv201 CV201_PND 正是此例：只配 `rotateScreen:270` 不配 rotateTouch
+  —— 某 1600×600 竖装屏工程正是此例：只配 `rotateScreen:270` 不配 rotateTouch
 - 同值成套的常规旋转（F133 工程 rotateScreen:270+rotateTouch:270）走 .prefs 就够，不必进 package.properties
 
-## mark_cv201 实测案例（同代码双屏方向适配）
+## 实测案例（同代码双屏方向适配）
 
-- `CV201_PND`（UI 1600×600）：`EasyUI.cfg={"rotateScreen": 270, "watchDogEnable":false}` → 设备屏幕坐标方向与 UI 差 270°，旋转适配
-- `CV201_PND_1024_600`（UI 1024×600）：`EasyUI.cfg={ "watchDogEnable":false}` → 屏幕方向正常，**不需要写 rotateScreen**
-- 结论：**屏幕旋转是跟着设备物理安装方向走的，不是 UI 决定的**；同 1600×600 UI 的 lib_uav_camera 不转、CV201_PND 转 270
-- 同类先例：T113 车载 PND「竖装横显」= 1024×600 横 UI + `rotateScreen: 270`（references/kb/t113-car-link.md）
-- F133 系工程（AirPlayF133/CycleComputer 等）惯例成套：`rotateScreen:270 + rotateTouch:270 + gfxMode:1 + ninePatchAccel:true`
+- 竖装屏工程（UI 1600×600）：`EasyUI.cfg={"rotateScreen": 270, "watchDogEnable":false}` → 设备屏幕坐标方向与 UI 差 270°，旋转适配
+- 同 UI 横装屏工程（1024×600）：`EasyUI.cfg={ "watchDogEnable":false}` → 屏幕方向正常，**不需要写 rotateScreen**
+- 结论：**屏幕旋转是跟着设备物理安装方向走的，不是 UI 决定的**
+- F133 系工程惯例成套：`rotateScreen:270 + rotateTouch:270 + gfxMode:1 + ninePatchAccel:true`
 
 ## 代码消费链
 
 ```cpp
 CONFIGMANAGER->getScreenRotate();   // 读 rotateScreen（ConfigManager.h 注释 rot: 0 90 180 270）
 enum disp_rot_e rot = (disp_rot_e)(CONFIGMANAGER->getScreenRotate() / 90);  // link 投屏方向
-ERotation rot = (ERotation)(CONFIGMANAGER->getScreenRotate() / 90);          // V85X 摄像头 setRotation 跟随
+ERotation rot = (ERotation)(CONFIGMANAGER->getScreenRotate() / 90);          // 摄像头画面 setRotation 跟随屏幕
 ```
 - `ConfigManager.h` 接口：`setScreenRotate(int)` / `setTouchRotate(int)` / `getScreenRotate()`；宏 `CONFIGMANAGER`
-- mark_cv201 倒车画面 reverse 页的 `get_camera_rot()` 是**另一路**（摄像头画面自身旋转参数，来自 `_s_camera_info`，非屏幕旋转），别混淆
+- 倒车画面 reverse 页的 `get_camera_rot()` 是**另一路**（摄像头画面自身旋转参数，来自 `_s_camera_info`，非屏幕旋转），别混淆
 
 ## 常见坑 / 使用规则
 
@@ -87,4 +86,3 @@ ERotation rot = (ERotation)(CONFIGMANAGER->getScreenRotate() / 90);          // 
 
 - wiki `font/font_setting.md`：enable.font.location + 多字体完整流程
 - wiki `devflow/new_project.md`：创建项目时"屏幕旋转"选项（IDE 向导对应字段）
-- references/kb/t113-car-link.md：T113 PND 竖装横显先例

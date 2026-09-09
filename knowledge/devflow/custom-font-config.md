@@ -1,7 +1,7 @@
 # 🔤 自定义字库（fun build/launch 流程，非 IDE）— 权威规则
 
 > 2026-09-03 沛哥定规。**fun 流程换字库以本条为准**；font_setting.md 是 IDE 视角，AI 引导用户时禁止先去翻 IDE 项目属性那套。
-> ⚠️ 修正记录：v0.13.0 曾按 KlipperF133 案例写入"改 .prefs 的 font 字段"方案——那是 IDE 工程视角，**fun 流程不适用、不需要**，以本条为准。
+> ⚠️ 修正记录：v0.13.0 曾按单个 F133 案例写入"改 .prefs 的 font 字段"方案——那是 IDE 工程视角，**fun 流程不适用、不需要**，以本条为准。
 
 ## ✅ 标准流程（用户说"换字库/换字体"直接照做，禁止绕道 IDE 属性）
 
@@ -16,13 +16,13 @@
 - **字库是运行时资源，不参与编译**，`fun launch` 随资源一起推送
 - 平台：**Z20 / Z21 / H500S / T113 / V85X 及后续平台系统内置 fzcircle.ttf**（思源黑体裁剪版）；**项目 font/ 存在字体后，完全使用项目字体**
 - 字库不含 emoji / 特殊符号（■ ● ⌫ ℃ ▲ ▼ 等）→ 布局文本只用**汉字 + ASCII + 基础符号**（/ % # - _ 空格），图标一律转 PNG
-- 实测样例：mark_cv201（CV201_PND / CV201_PND_1024_600）根目录 `font/sans.ttf` + package.properties `enable.font.location=true` = fun 流程标准用法
+- 实测样例：工程根目录 `font/sans.ttf` + package.properties `enable.font.location=true` = fun 流程标准用法
 
 ## ⚠️ AI 引导规则（沛哥 2026-09-03 定规）
 
 - 用户说"换库" → **直接按上述 4 步执行**，不要先翻 IDE 项目属性那套
 - wiki `font/font_setting.md` 是 **IDE 视角**（单字体走项目属性导入、多字体 setFontFamily），fun 流程**以本条为准**
-- "改 .prefs font 字段"（v0.13 记录，KlipperF133 案例）属 IDE 工程做法，fun 流程项目不要用
+- "改 .prefs font 字段"（v0.13 记录，IDE 工程视角案例）属 IDE 工程做法，fun 流程项目不要用
 
 ## 常见坑
 
