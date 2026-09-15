@@ -53,9 +53,10 @@ except Exception:
     dss = None
 
 # ========== MCP 版本号（每次发布递增，AI/用户可查询确认是否最新）==========
-MCP_VERSION = '0.27.65-open'
-MCP_BUILD = '2026-09-14'
+MCP_VERSION = '0.27.68-open'
+MCP_BUILD = '2026-09-16'
 MCP_FEATURES = [
+    '2026-09-16: 多设备设备选择修正 v0.27.68-open——①**行为修正**：`fun launch` **支持** `-s <serial|IP>`（旧说明「不支持 -s」作废）；多台 adb 设备同时在线（如 USB + WiFi adb）时不显式指定设备号，fun 会**静默取 `adb devices` 列表第一个**（不报错/不警告）→ 可能推到另一台机器上，症状是「改完 UI、编译通过、launch 看着成功但界面不变」；②**MCP 侧**：`flythings_build_ui_flow` 的 `device` 参数现在真正生效（内部追加 `-s <device>`）；未指定 device 且检测到 >1 台在线设备时在返回体里给 `warnings`（不静默）；③**判据**：比对设备与本地 `ui/*.ftu`（字节数 + md5 应一致，设备侧用已推送的 `/tmp/busybox md5sum`）；④知识库新增 `knowledge/devflow/cli-fun-toolchain.md` §7（机制/危害/正确做法/判据命令/WiFi adb 用法）。',
     '2026-09-15: 公开版（release）对齐 v0.27.65-open——开放范围＝平台通用能力：基础 UI 控件/布局工具链、'
     'GPIO/串口等硬件控制（hardware API）、USB/UVC 通用接入、WiFi 与蓝牙（BLE 组件）、V85X 硬件 H264 解码/显示/存储、'
     '平台与型号库、调试工具；涉及 accessKey 的保密协议栈能力不在公开版内。',
@@ -342,10 +343,9 @@ def flythings_build_ui_flow(project_root: str, with_launch: bool = False, device
     ② fui pack ③ fun install 同步依赖 ④ fun build ⑤ **默认到此为止（不推真机）**；
     要推设备必须显式 with_launch=True（用户明确说「推到设备/跑一下」时才传）。
     ⚠️ fun launch 网络推送失败/超时会**自动重试 5 次**（间隔 2s，覆盖网络抖动；信任 fun 差分推送，不自写 push 脚本校验）；
-    5 次仍失败（无 adb 设备/网络中断）返回 needDeviceInput=true，必须询问用户接入方式：
-    1) USB 接入：设备 USB 连电脑，确认 adb devices 可见后重试；2) 网络接入：
-    先在电脑执行 adb connect <设备IP> 完成配对再重试。
-    ⚠️ fun launch 不支持 -s 参数，设备选择由 fun 自动完成，禁止猜 IP。
+    5 次仍失败返回 needDeviceInput=true，必须询问用户接入方式：
+    1) USB：确认 adb devices 可见后重试；2) 网络：先 adb connect <设备IP> 再重试。
+    ⚠️ 多设备（USB+WiFi adb）必须传 device='<serial|IP>'（走 fun launch -s）；不传则 fun 静默取列表第一个 → 可能推错设备。
     传入项目根目录。改过 json 必须 pack，否则设备仍跑旧 ftu。
     ⚠️⚠️ src/activity/ 目录（mainActivity.cpp/h）由 IDE 编译时自动生成，构建流程已自动处理；
     禁止手动创建/修改该目录文件，业务代码只写 src/logic/*.cc。
