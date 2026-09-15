@@ -6,3 +6,7 @@ dist/
 .DS_Store
 Thumbs.db
 fix.log
+
+screenshots/
+*.bak
+*.orig

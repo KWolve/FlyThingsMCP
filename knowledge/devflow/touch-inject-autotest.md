@@ -1,12 +1,15 @@
-# 触摸注入/UI 自动化测试：先调现成 ui_test 工具（禁止先造轮子）
+# 触摸注入/UI 自动化测试：先调现成 `touch` 工具（禁止先造轮子）
 
 > 2026-09-08 入库（补 knowledge 检索缺口：此前只有 wiki 老版 event.c 原理，AI 不知道有现成工具）。
+> **2026-09-12 升级（沛哥实测反馈）：老 input / ui_test / mt_test 存三个硬伤——单点协议写死、
+> 节点要人工传、节点或 IC 一变就注入失败 → AI 只能反复 try。已新建统一工具 `touch`
+> （自动扫节点 + 自动判协议）并全平台编译。**
 > 定位：用户要「自动化测试 / 遍历验收 / 压测 / 自动点击 / 模拟触摸 / 滑动验证 UI」时，
-> **先调 MCP 工具 `flythings_gen_ui_test` + 预编译 `ui_test` ELF（bin_tools/{平台}/ui_test）**，
-> 常规自动化**无需重新编译、无需抄代码**；event.c 原理只在定制/移植新平台时参考。
+> **先调 MCP 工具 `flythings_gen_ui_test` + 预编译 `touch` ELF（bin_tools/{平台}/touch）**，
+> 常规自动化**无需重新编译、无需抄代码、无需猜节点与协议**；event.c 原理只在定制/移植新平台时参考。
 
 ## 🔑 关键词索引
-**触摸注入 / 模拟触摸 / 自动化测试 / 自动点击 / tap / swipe / monkey / 压测 / 遍历验收 / ui_test / input 事件 / /dev/input / 触摸协议 / EV_SYN**
+**触摸注入 / 模拟触摸 / 自动化测试 / 自动点击 / tap / swipe / monkey / 压测 / 遍历验收 / touch / ui_test / mt_test / input 事件 / /dev/input / 触摸协议 / EV_SYN / 坐标恒 0 / 节点自动识别**
 
 ## ✅ 首选路径（现成工具，MCP 已分发）
 
@@ -18,8 +21,53 @@
 - `ask`      - 默认先问用户选哪种
 返回 `deployHint`（push ELF + 脚本 + 运行命令），按提示执行即可。
 
-### 2. 预编译工具：`bin_tools/{平台}/ui_test` 或 `mt_test`（按屏幕协议选）
+### 2. 预编译工具：`bin_tools/{平台}/touch` ⭐ 首选（2026-09-12 新增）
 
+> **一句话：不传节点、不选协议，`touch` 自己搞定。** 取代 ui_test/mt_test 二选一的试错。
+>
+> **为什么会有这个工具**：老 `input`（早期实现）只实现单点协议（ABS_X/Y +
+> ABS_PRESSURE + BTN_TOUCH），事件节点要人工传 `/dev/input/eventX`，且只预编译了 h500s/z21
+> 两个老二进制 → 碰到 gt9xx 这类 MT 屏或节点编号不同的板子就注入失败（坐标恒 0），
+> AI 只能反复换节点/试协议。`touch` 把这三件事全做成自动的。
+
+```bash
+# 0. 部署（平台目录按实际选）
+adb push bin_tools/z20/touch /data/touch && adb shell chmod +x /data/touch
+
+# 1. 排查第一步：list（列出 /dev/input 全部设备 + 协议判定）
+adb shell /data/touch list
+#   ★ /dev/input/event0  gt9xx-ts  proto=MT-A  mtX=0..799 mtY=0..1279 BTN_TOUCH
+#     /dev/input/event1  gpio-keys （子设备，自动排除）
+adb shell /data/touch info            # 能力位/量程/协议详情
+
+# 2. 正常注入（节点/协议都不用传）
+adb shell /data/touch tap 100 200
+adb shell /data/touch swipe 100 600 700 600
+adb shell /data/touch run /data/ui_test_script.txt
+adb shell /data/touch monkey 800 1280 500
+```
+
+**自动识别逻辑**：遍历 `/dev/input/event*` → `EVIOCGBIT` 能力位筛（必须有 EV_ABS + 坐标轴；
+名字含 touch/ts/gt9/panel 加分，含 keyboard/button/accel 扣分）→ `ABS_MT_SLOT` = MT-B，
+`ABS_MT_POSITION_X` = MT-A，否则单点 → 注入时 MT 屏若同时声明 ABS_X/Y 就一并上报（兼容读单点轴的上层）。
+
+**选项**：`-d/--dev` 指定节点、`--proto single|a|b` 手动覆盖、`--hold ms`（tap 按下→抬起，默认 40）、
+`--scale`（屏幕坐标→ABS 量程换算）、`--no-swipe`、`record/play` 录制回放。
+
+**能解决什么**：
+- 节点编号不同（event0/1/2…）→ 自动扫，不用 getevent 猜
+- IC/协议不同（单点 / MT-A / MT-B）→ 自动判，**不会再有「坐标恒 0」死循环**
+- 平台缺 ELF → 已全平台编好（f133/f135/z20/z21/t113/v85x）
+
+源码/自测/重编：`tools/touch_inject/`（`wsl bash scripts/touch_build_all.sh all`；
+`list`/CLI/降级路径有 x86 自测脚本，真机行为需设备验证）。
+
+---
+
+### 3. 兼容保留：`ui_test`（单点）/ `mt_test`（MT Type-A）
+
+> 仅在 `touch` 缺该平台 ELF、或需要人工核验协议时用；**新工作不要再用它们**。
+>
 > **⛔ 关键坑（2026-09-08 补，沛哥 V553 实测）**：`ui_test` 是**单点协议**
 > （ABS_X/ABS_Y + BTN_TOUCH），只适配老电阻屏/单点电容屏。**V85X 设备的
 > gt9xx 是 MT Type-A 协议**（MODALIAS `ra30,32,35,36,39` = ABS_MT_TOUCH_MAJOR
@@ -29,7 +77,7 @@
 > 解决：MT Type-A 屏改用 `mt_test`（`ABS_MT_POSITION_X/Y + ABS_MT_TRACKING_ID`）。
 > 接口与 ui_test 完全一致（tap/swipe/long/monkey/run），直接换工具名即可。
 
-**协议速判**（注入前必看）：
+**协议速判**（注入前必看；**首选直接 `touch list` 一步到位**）：
 ```bash
 # 方法 1：读能力位
 adb shell "cat /sys/devices/virtual/input/input*/capabilities/abs | xxd"
@@ -42,13 +90,40 @@ adb shell mt_test /dev/input/event0 tap 100 100
 # FlyThings 收到坐标非 0 = 协议对；恒 0 = 协议错，换另一个
 ```
 
-已编译平台：
+**工具清单**（前两行兼容保留）：
 
 | 工具 | 协议 | 平台 |
 |------|------|------|
+| `touch` ⭐ | **自动**（单点/MT-A/MT-B） | z21 / z20 / t113 / f133 / f135 / v85x |
 | `ui_test` | 单点 | z21 / z20 / t113 / f133 / v85x |
-| `mt_test` | MT Type-A | z21 / z20 / t113 / v85x（f133/f135 待 WSL 编译） |
+| `mt_test` | MT Type-A | z21 / z20 / t113 / v85x |
 > 更全的调试工具箱（ifconfig/ping/netstat 等网络/系统命令）→ 同目录 `busybox`（见 busybox-debug-library.md）。
+>
+> `touch` 常用：**先 `touch check [x y]`**（一条命令自检：节点/协议/量程落点结论，给坐标则再注一次 tap；退出码 0=可用 / 3=无节点 / 4=有风险）、`touch list` / `touch info` / `touch [-d /dev/input/eventN] tap x y`；
+> 触摸之外：`key <code> [ms]`（物理键，需 -d）· `sweep <from> <to> [ms]`（扫键码）· `raw t:c:v …`（原始事件）；
+> 选项 `--proto single|a|b`、`--hold <ms>`、`--scale`、`--screen WxH`、`-v`（打印探测失败原因，`TOUCH_DEBUG=1` 同效）。
+
+## 🖥 V85X 真机实录（2026-09-14，两块屏两种协议——都是"单点工具必死"）
+
+| 板子 | 触摸节点 | IC | 协议 | `ABS_X/Y` | 结论 |
+|------|---------|----|------|-----------|------|
+| Zkswe_V85X_SPINOR（480×800） | `/dev/input/event0` | gt9xx | **MT-A**（48/50/53/54/57，无 SLOT） | **不存在** | `ui_test` 完全点不动；`touch` 自动判 MT-A ✅ |
+| V851s（480×800，学习机 PocketGame） | `/dev/input/event4` | axs_ts | **MT-B**（有 SLOT+TRACKING_ID） | **范围 0..0** | MT-A 写法（老 `pginj`/`mt_test` 发 `SYN_MT_REPORT`）→ 整帧作废；按上面 2b 三条修后全通 |
+
+**三条必须知道的坑（都踩过）**：
+1. **`ABS_X/Y` 可能压根不存在**（V85X 两块屏都这样）：单点轴工具在这类屏上不是"偏"，是**完全点不动**（写了也被钳成 0）。判据：`touch info` 看 `ABS_X=0 ABS_Y=0` + `MT_POSITION_X=1`。
+2. **声明的 MT 量程 ≠ 屏幕尺寸**：SPINOR 实测 `mtX=0..1024 mtY=0..600`、屏却 480×800；axs_ts 板 `mtX=0..480 mtY=0..960`、屏 480×800——**两块都实际 raw == 屏幕 1:1**（SPINOR 注 (437,32) 命中右上角按钮；axs_ts 注入日志回 `x=58 y=160` / `x=400 y=700` 逐点相符）。所以**别想当然加 `--scale`**：`touch check` 会把落点结论直接告诉你（量程≈屏 → 直接用；两轴比例一致且≠1 → 需换算；**两轴不一致 >5% → ⚠ 别用 --scale，先按 1:1 注一次看日志**），`--scale` 本身也会在同一口径下警告并取消换算；确需换算用 `--screen WxH` 指定真实尺寸。
+3. **`EVIOCGBIT` 成功时不一定返回 0**：SPINOR 这颗内核返回**拷贝字节数（实测 4）**。写 `if (ioctl(...) == 0)` 会让能力探测永远失败 → `touch list` 报 "no input device found"（v0.27.61 修成 `>= 0`）。**移植任何 evdev 工具都按 `>= 0` 判成功。**
+
+**宿主侧小贴士**：USB 设备在 `adb devices` 里消失/`offline` 时，先清掉所有 adb 进程再起（Windows：`taskkill /IM adb.exe /F` → `adb start-server`）——IDE 自带 adb 会抢占 5037 并留陈旧状态；SPINOR 实测就这样从"完全看不到"恢复成 `device`，**不用拔插**。
+
+**✅ 2026-09-14 实测验收（axs_ts / MT-B 板，同一 USB 位）：** 用我们自己的 `touch` 跑通——
+`tap 58 160` → 应用日志 `touch action=1 (58,160)` → `action=2 (58,160)`；
+`swipe 240 600 240 250 24 12` → 一串 `action=3`（240,279→255 插值）+ `action=2 (240,250)`；
+`raw 3:57:1 3:53:100 … 1:330:1 0:0:0` → `action=1 (100,100)`。
+即：**MT-B 三铁律 + 「量程 0..0 不算可用」两条对齐后，我们的工具在这块屏上也能点**，不必依赖工程内自研注入器（`pginj.c`）。
+
+**工具面已对齐工程内 `pginj.c` 的能力：** `touch [dev] key <code> [ms]`（物理键注入）· `sweep <from> <to> [ms]`（扫键码区间找真实键值）· `raw t:c:v [t:c:v ...]`（原始事件逃生口，末尾一次 SYN）；健注入不要求触摸节点（`gpio-keys` 之类没 ABS 也能用），但需 `-d` 指定节点（不自动挑触摸节点）。
 
 ## 🔬 底层原理（event.c 精要，定制/移植才需要）
 
@@ -64,10 +139,14 @@ write(fd, &event, sizeof(event));   // fd = open(dev, O_WRONLY)
 ### ⛔ 协议铁律
 1. **单点按下序列**：`EV_ABS ABS_X/Y → EV_ABS ABS_PRESSURE(100) → EV_KEY BTN_TOUCH=1 → EV_SYN`；抬起 = PRESSURE=0 → BTN_TOUCH=0 → EV_SYN
 2. **MT Type-A 序列**：`EV_ABS ABS_MT_TRACKING_ID(递增) → ABS_MT_POSITION_X/Y → ABS_MT_TOUCH_MAJOR → EV_KEY BTN_TOUCH=1 → EV_SYN`；抬起 = `ABS_MT_TRACKING_ID=-1 → BTN_TOUCH=0 → EV_SYN`
+2b. **MT Type-B 三条（有 `ABS_MT_SLOT` 的屏，别拿 A 的写法套）**：
+   - **绝不能发 `SYN_MT_REPORT`**：那是 type-A 的点位分隔符，B 设备上发它**整帧作废**（`dd` 能抓到事件、应用日志一行都没有）
+   - **`BTN_TOUCH` 必须与位置同帧**：只发 MT 位置时框架给 DOWN+MOVE、**永远不给 UP** → 之后所有注入退化成 MOVE（现象像"时灵时不灵"）
+   - **抬起帧同帧带 `TRACKING_ID=-1` + `BTN_TOUCH=0`**：缺了会留"幽灵手指"（判据：日志里只有 `action=3/2` 没有 `action=1`；再点一次或重启应用可恢复）
 3. **EV_SYN 必须发**，否则内核不提交事件——最容易漏的坑
 4. **滑动逐像素/插值过渡**，禁止一次跳终点（被识别为无效/抖动），每步跟 EV_SYN
 5. 时间戳 `gettimeofday` 必须填
-6. **协议用错 → 坐标恒 0**：注入后 FlyThings 收到 `(0, 0)` 几乎都是协议不匹配，先按"协议速判"切换 ui_test ↔ mt_test
+6. **协议用错 → 坐标恒 0**：注入后 FlyThings 收到 `(0, 0)` 几乎都是协议不匹配。**首选用 `touch`（自动判协议，直接绕开这个坑）**；若在用 ui_test/mt_test，才按上面"协议速判"切换。
 
 ### 移植新平台（ui_test 没有的平台）
 1. 确认触摸节点：`scandir("/dev/input")` + `EVIOCGNAME`（含 touch/ts）或 evtest/getevent
@@ -231,3 +310,13 @@ arm-pc-linux-gnueabihf-gcc -static -O2 mt_test.c -o mt_test         # 4.5MB（gl
 # RISC-V 64 musl（f133 + f135）— 待 WSL 解封后用玄铁 Xuantie 工具链
 riscv64-unknown-linux-musl-gcc -static -O2 mt_test.c -o mt_test
 ```
+
+## 🔁 抓帧时机：静止帧会漏掉瞬时元素（实测教训）
+
+- **注入 + 抓帧放在同一次 adb 调用里**（`… && 抓帧命令`），否则中间的网络往返把瞬时状态等没了。
+- **多档 sleep 差分**：同一次操作后分别抓 3~4 张（如 0.15s / 0.4s / 1.0s）→ diff 出“变化中的元素”：
+  瞬时元素（滚动条、Toast、按压态、动画）只在其中一两张出现，单张看不到。
+- **`hasScrollbar` 滚动条约 0.6 秒淡出**、颜色**逐帧变化** → 想抓它必须在滚动结束后 0.6s 内抓，
+  且判据看**色阶**（不是固定灰值）；过了窗口期整条消失 → 会误判“滚动条没生效”。
+- 页面切换类测试：先 `logcat` 看到 `onUI_show` 再抓帧（导航×回调矩阵见 activity-code-skeleton.md）。
+- 结论：**单张静止帧不足以判定交互结果**——要么多帧差分，要么以日志为主、像素为辅（两者都会骗人）。

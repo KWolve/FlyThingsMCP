@@ -3,13 +3,14 @@
 > 2026-09-08 沛哥定规。**背景**：带默认值字段若靠引擎缺省，不同 fui/easyui 版本默认处理可能不同 → 版本不匹配异常（touchable 为典型）。
 > **规则**：生成 json 时每个控件输出本类型**必写字段全集（含默认值 -1/0/false/字号，均显式写）**，不做缺省声明；
 > -1 = 0xFFFFFFFF 是有意义的显式值（非噪音）。写全对新引擎无害，且产物与新版 IDE 全量序列化格式兼容。
-> **权威基准**：新 IDE 全量序列化工程（42 json）——**每类型控件 100% 共有的字段 = 必选**；
-> **交叉复验**：35 个官方 Demo/44 json（ftu unpack 反解）。
+> **权威基准（沛哥指定）**：`projects/SampleUI-New/ui/1024x600`（42 json、新 IDE 全量序列化）——**每类型控件 100% 共有的字段 = 必选**；
+> **交叉复验**：官方 Demo 工程（35 个 Demo / 44 json，ftu unpack 反解）。
 > **落地**：check_all.py #14 按本表校验缺键（FAIL）；html2json.py 已按全集输出；手写 json 缺键照本表补默认。
 
 ## 沛哥 5 条口径（2026-09-08）
 1. **beepEnable 不强制**：交互控件默认支持，废除「恒带 beepEnable:true」规范（两源 edittext/window 均证实非必写）
 2. **touchable 交互控件显式 true**：button/listview/可拖 seekbar(有 thumb)/qrcode/videoview/diagram/subitem/slidewindow/circlebar；容器与纯显示显式 **false**（window/painter/textview/cameraview/digitalclock 主 false）
+   - ⚠️ **例外：radiogroup 虽是容器，也必须 `touchable: true`**（2026-09-10 修正）。写 false 会让整组**收不到触摸、点了没反应**（单选组点不动）；生成器/手写 json 均按 true。详见 `uicontrols/touch-events.md`
 3. **qrcode 恒写 padding:10**（各边默认 10；SampleUI 无 padding 键、basedemo 亦无，按沛哥口径写）
 4. **videoview 按 SampleUI**：无 beepEnable；键 backgroundColor 0/caption/defaultVolume 5/id/loopPlayback false/position/rotation 0/touchable true/visible true
 5. **必选 = 扫描 SampleUI 每类型控件 100% 共有的字段（交集）**；值含默认全部显式
@@ -33,7 +34,7 @@
 | pointer | id/caption/position/animatable/backgroundColor/backgroundPic/clockwise/fixedPoint/pointerPic/pointerSize/rotateSpeed/rotationPoint/startAngle/touchable/visible | rotateSpeed 1；startAngle 0；clockwise/animatable true；图/点位按设计有才写 |
 | diagram | id/caption/position/backgroundColor/infos/region/touchable/visible/xAxisRange/yAxisRange | touchable true 主；region=position；infos[] 见子结构 |
 | checkbox | id/caption/position/alignment/checked/colorTab/bgColorTab/backgroundColor/bold/fontSize/iconPosition/italic/text/touchable/textPosition/visible | basedemo 23 键全字段折衷；text 恒写 |
-| radiogroup | id/caption/position/backgroundColor/touchable/visible/radiobuttons | touchable false；radiobuttons[] 子项见下 |
+| radiogroup | id/caption/position/backgroundColor/touchable/visible/radiobuttons | **touchable true**（⚠️ 是「容器显式 false」通用口径的**例外**，2026-09-10 修正）；radiobuttons[] 子项见下 |
 | radiobutton | id/caption/position/alignment/checked/colorTab/bgColorTab/backgroundColor/bold/fontSize/italic/text/touchable/visible | basedemo 23 键全字段折衷；checked false |
 | pagewindow | id/caption/position/dragMaxDis/orientation/edgeEffect/rollSpeed | 200/0/1/60；SampleUI 无样例，basedemo+demo 验证（无 beepEnable） |
 | scrollwindow | id/caption/position/dragMaxDis/orientation/edgeEffect | 200/0/1；同上（无 beepEnable） |
@@ -73,3 +74,4 @@
 - html2json.py：生成器已按本表输出（含 item.position 自动算）；check_all.py #14 校验
 - 历史省略式 json（IDE 手工/旧生成器）跑 check_all #14 会提示缺键，按本表补默认即可
 - 检索边界：控件 json 字段以本文件 + knowledge/uicontrols/*-fields.md + 官方文档站为准
+- ⚠️ **滑动/拖拽字段取值**（`dragMaxDis`/`edgeEffect`/`autoRollback`/`rollSpeed`，listview/scrollwindow/pagewindow/slidewindow 共用）：本表只定「必写 + 默认值」，**手感取值规范见 `scroll-drag-interaction-spec.md`**（listview 的 dragMaxDis 填手感值 ≤ 一行高，禁止填列表高度）

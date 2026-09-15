@@ -4,13 +4,19 @@
 核心思路：
   ui/*.json 布局本身已包含全部控件坐标（position left/top/width/height）与
   可交互信息（touchable/visible）——直接解析 json 生成测试**数据脚本**，
-  配合预编译的通用触摸注入工具（bin_tools/{platform}/ui_test ELF）执行。
+  配合预编译的通用触摸注入工具（bin_tools/{platform}/touch ELF）执行。
 
-  架构（沛哥 2026-08-31 确认）：
-    - 通用工具（触摸注入 ui_test、将来 busybox 等）在电脑端预编译成各平台 ELF，
+  架构（沛哥 2026-08-31 确认；2026-09-12 换用统一工具 touch）：
+    - 通用工具（触摸注入 touch、busybox 等）在电脑端预编译成各平台 ELF，
       放 MCP 独立目录 bin_tools/{platform}/，一次编译处处复用
     - 测试项目只生成数据文件（script.txt：tap/swipe/delay 指令），不再现场编译
     - 好处：tools 不膨胀、生成秒级、部署 = adb push ELF + 脚本
+
+  ⚠️ 注入工具选择（2026-09-12）：
+    - **首选 `touch`**（bin_tools/{平台}/touch）：自动扫描 /dev/input 找触摸节点、
+      自动判协议（MT-B / MT-A / 单点），**部署命令不需要传设备节点**
+    - `ui_test`（单点）/ `mt_test`（MT-A）保留兼容，但需人工指定节点且要猜协议，
+      仅在 touch 缺该平台 ELF 时退回使用
 
   test_type:
     traverse - 遍历控件验收：所有可交互控件逐个点击+滑动（生成脚本）+ 资源缺失检查
@@ -20,9 +26,13 @@
 """
 import json, os, re, subprocess, shutil
 
+import platforms as _platforms  # 平台名唯一来源（别在这里再抄一份白名单）
+
 _BASE = os.path.dirname(os.path.abspath(__file__))
 BIN_TOOLS_DIR = os.path.join(_BASE, 'bin_tools')
-SUPPORTED_PLATFORMS = ('z21', 'z20', 't113', 'f133', 'v85x')
+# 可跑 UI 测试的平台 = platforms.py 里可建工程的平台（小写化），单一来源。
+# 以前这里手抄一份 ('z21','z20',...) 元组，与 platforms.py 漂移了也没人知道。
+SUPPORTED_PLATFORMS = tuple(p.lower() for p in _platforms.supported())
 
 # 可交互控件类型（touchable=true 时生成点击）
 INTERACTIVE_TYPES = ('button', 'checkbox', 'radiogroup', 'edittext', 'seekbar',
@@ -33,12 +43,21 @@ SWIPE_TYPES = ('seekbar', 'slidewindow', 'scrollwindow', 'pagewindow')
 
 
 def _platform_elf(platform):
-    """返回预编译 ui_test ELF 路径（bin_tools/{platform}/ui_test）。"""
-    p = platform.lower()
-    if p not in SUPPORTED_PLATFORMS:
+    """返回预编译触摸注入 ELF 路径（**按真实文件探测**，不是按平台名白名单）。
+
+    解析（支持别名/大小写）→ 取 bin_tools 目录名 → 真的存在 touch 才用，
+    其次退回老的 ui_test；两边都没有就回 None（调用方据此报「未预编译」，
+    并把真实可用平台列出来，而不是笼统地说平台不支持）。
+    """
+    info = _platforms.resolve(platform)
+    if not info or not info.get('buildable'):
         return None
-    elf = os.path.join(BIN_TOOLS_DIR, p, 'ui_test')
-    return elf if os.path.isfile(elf) else None
+    p = info['binTool']
+    for name in ('touch', 'ui_test'):
+        elf = os.path.join(BIN_TOOLS_DIR, p, name)
+        if os.path.isfile(elf):
+            return elf
+    return None
 
 
 def _parse_ui_jsons(project_root):
@@ -157,11 +176,12 @@ def flythings_gen_ui_test(project_root, test_type='ask', output_dir='',
     test_type:
       ask      - 询问用户三种验收方式（默认，返回选项说明）
       traverse - 遍历控件验收：生成 tap/swipe 脚本 + 资源缺失检查
-      monkey   - 压测 MonkeyTest：随机 tap/swipe（ui_test monkey 命令直接跑）
+      monkey   - 压测 MonkeyTest：随机 tap/swipe（touch monkey 命令直接跑）
       custom   - 自定义验收：按用户提供的要求生成（差异化逻辑可走 AI）
 
-    执行依赖预编译工具 bin_tools/{platform}/ui_test（ELF，电脑端已编好），
+    执行依赖预编译工具 bin_tools/{platform}/touch（ELF，电脑端已编好），
     部署 = adb push ELF + 脚本，不再现场编译。
+    **touch 自动识别触摸节点与协议，部署命令不带 /dev/input/eventN**。
     """
     if test_type not in ('ask', 'traverse', 'monkey', 'custom'):
         return {'success': False,
@@ -179,7 +199,10 @@ def flythings_gen_ui_test(project_root, test_type='ask', output_dir='',
     elf = _platform_elf(platform)
     if not elf:
         return {'success': False,
-                'error': '平台 %s 未预编译 ui_test（可用: %s）' % (platform, '/'.join(SUPPORTED_PLATFORMS))}
+                'error': '平台 %s 未预编译触摸注入工具（可用: %s）'
+                         % (platform, '/'.join(SUPPORTED_PLATFORMS)),
+                'hint': '平台名支持别名/大小写（如 F133EMMC -> F133）；'
+                        '若确实是新平台，按 bin_tools/README「新增平台/工具流程」补预编译 ELF'} 
 
     pages, err = _parse_ui_jsons(root)
     if err:
@@ -230,21 +253,26 @@ def flythings_gen_ui_test(project_root, test_type='ask', output_dir='',
                 'hint': '请提供自定义验收要求（如：循环点击 A 按钮 100 次后截图校验），'
                         '差异化测试逻辑将由 AI 生成，普通遍历/压测建议用 traverse/monkey 免 AI。'}
 
-    # 部署提示：push ELF + 脚本，直接跑
+    # 部署提示：push ELF + 脚本，直接跑（touch 自动选节点/协议，不写 eventN）
     elf_name = os.path.basename(elf)
     push_elf = 'adb push %s /data/%s && adb shell chmod +x /data/%s' % (elf, elf_name, elf_name)
+    if elf_name == 'touch':
+        run_tpl = 'adb shell /data/touch '          # 节点+协议自动识别
+        note = '（touch 自动扫描 /dev/input 并判协议；想先看清单跑 `adb shell /data/touch list`；' \
+               '运行同时 adb logcat 观察 [TOUCH] 与业务日志）'
+    else:                                            # 退回 ui_test/mt_test：需人工给节点
+        run_tpl = 'adb shell /data/%s /dev/input/eventN ' % elf_name
+        note = '（ui_test/mt_test 需要设备节点，先 getevent 确认；' \
+               '运行同时 adb logcat 观察业务日志）'
     if test_type == 'traverse':
         script_name = os.path.basename(result['scriptFile'])
         push_script = 'adb push %s /data/%s' % (result['scriptFile'], script_name)
-        cmd = 'adb shell /data/%s /dev/input/event1 %s' % (elf_name, run_cmd)
-        result['deployHint'] = ('%s && %s && %s\n（设备节点按实际 getevent 确认；'
-                                '运行同时 adb logcat 观察 [UITEST] 与业务日志）'
-                                % (push_elf, push_script, cmd))
+        cmd = run_tpl + 'run /data/' + script_name
+        result['deployHint'] = ('%s && %s && %s\n%s'
+                                % (push_elf, push_script, cmd, note))
     else:
-        cmd = 'adb shell /data/%s /dev/input/event1 %s' % (elf_name, run_cmd)
-        result['deployHint'] = ('%s && %s\n（设备节点按实际 getevent 确认；'
-                                '运行同时 adb logcat 观察 [MONKEY] 与业务日志）'
-                                % (push_elf, cmd))
+        cmd = run_tpl + run_cmd
+        result['deployHint'] = ('%s && %s\n%s' % (push_elf, cmd, note))
     return result
 
 

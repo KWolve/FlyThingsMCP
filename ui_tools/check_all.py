@@ -4,6 +4,12 @@
 依次执行：根节点 / 嵌套深度 / 特殊字符 / 图片引用 / 回调 / 指针 / 定时器表 / 括号 /
 开发者修改检测（ftu 比 json 新>30s 自动同步）+ fui pack 成功。
 全部 PASS 才允许交付。任何 FAIL 都会给出具体文件与原因。
+第 15/16 项为 **WARN（需人工审批，不影响 PASS/FAIL）**：装饰件压在可触摸控件之上、
+setTouchable(false) 未配套 setTouchPass(true)（沛哥 2026-09-10，见 knowledge/uicontrols/touch-events.md）。
+WARN 分两类意图：#15 会先评估「可能故意遮挡」（modal / 容器遮罩 / 整屏 / 完全覆盖 → 本就有意，忽略），
+其余才是「疑似误压」；WARN 永远只是给人工审批的清单，不自动修。
+第 18 项 = **设计令牌漂移检测**（沛哥 2026-09-12）：DESIGN.md 是冻结的视觉真相，json 里的颜色/字号
+应当来自令牌；出现令牌外的值 = 漂移。无 DESIGN.md 或令牌表未填全 → NOTE 跳过（不 FAIL，兼容存量工程）。
 """
 import glob
 import json
@@ -30,6 +36,7 @@ if not FUI:
 
 BLACKLIST = set('⌫℃■●‹－＋–…→★◆▶▷①')
 failures = []
+warnings = []
 
 try:
     from PIL import Image as _Image
@@ -162,15 +169,41 @@ def _all_controls(d, out=None):
 
 
 def _pic_path(root, ref):
-    """json 引用 images/xxx.png → 真实文件路径（resources/images 或 ui/images）。"""
+    """json 引用 → 真实文件路径。
+
+    先按 ref 原样相对 resources 找（支持 audio/xxx.png 这类带子目录的引用，
+    ui-layout-verify.md §图片引用），再退化到按 basename 在 resources/images 或
+    ui/images 里找（历史作品常只写 images/xxx.png）。
+    """
     if not ref:
         return None
+    exact = os.path.join(root, 'resources', ref.replace('/', os.sep))
+    if os.path.isfile(exact):
+        return exact
     base = os.path.basename(ref)
     for d in ('resources', 'ui'):
         p = os.path.join(root, d, 'images', base)
         if os.path.isfile(p):
             return p
     return None
+
+
+def _ui_pages(root):
+    """ui 布局 json 清单：同时支持两种真实工程布局 ui/*.json 与 ui/<分辨率>/*.json。
+
+    为什么两种都收：FlyThings 工程布局不一致——扁平 ui/main.json 与分层
+    ui/1024x600/main.json 都常见（基准工程 SampleUI-New 就是分层 42 个）。
+    原先只 glob 扁平一层，导致分层工程「0 页却报 ok」= **静默假阴性**
+    （v0.27.33 实测：SampleUI-New / ShowcaseAlbum-F133 / WebViewDemo 三个真实工程
+    全部 pages=0 且 ok=true），产物核对形同虚设。
+    返回按相对路径排序的绝对路径列表（只下探一层分辨率目录，不再无限递归）。
+    """
+    ui = os.path.join(root, 'ui')
+    found = set(glob.glob(os.path.join(ui, '*.json')))
+    for sub in sorted(glob.glob(os.path.join(ui, '*'))):
+        if os.path.isdir(sub):
+            found.update(glob.glob(os.path.join(sub, '*.json')))
+    return sorted(found)
 
 
 def _text_min_size(text, font_size, align):
@@ -211,11 +244,491 @@ def log(ok, msg):
         failures.append(msg)
 
 
+def warn(msg):
+    """WARN：不参与 PASS/FAIL 判定，输出给用户审批（沛哥 2026-09-10）。"""
+    print('  [WARN] ' + msg)
+    warnings.append(msg)
+
+
 def walk(d, out, depth=0):
     for k, v in d.items():
         if isinstance(v, dict) and '__' in k:
             out.append((depth, k, v.get('caption', '')))
             walk(v, out, depth + 1)
+
+
+def _rect(v):
+    p = v.get('position') or {}
+    l, t, w, h = p.get('left'), p.get('top'), p.get('width'), p.get('height')
+    if None in (l, t, w, h):
+        return None
+    return (l, t, l + w, t + h)
+
+
+def _overlap(a, b, min_axis=4):
+    """相交面积；任一轴重叠 < min_axis px 视为无效（手指/鼠标实际点不到 1px 条带，降噪）。"""
+    x = min(a[2], b[2]) - max(a[0], b[0])
+    y = min(a[3], b[3]) - max(a[1], b[1])
+    if x < min_axis or y < min_axis:
+        return 0
+    return x * y
+
+
+def _deco_blockers(d):
+    """同层兄弟中「后定义（z 更高）且 touchable=false」的控件压住 touchable=true 的控件。
+
+    对应 touch-events.md §1：touchable=false 不等于穿透，仍会吃掉下层触摸（下层拖不动/点不响应）。
+    返回 [(装饰件键, 装饰件控件, 被压控件键, 被压控件, 重叠面积)]；仅统计双方 visible。
+    （是否「故意遮挡」由 _deco_hint 单独评估，本函数只找几何上的遮挡关系。）
+    """
+    found = []
+
+    def scan(node):
+        kids = [(k, v) for k, v in node.items()
+                if isinstance(v, dict) and _CTRL_KEY_RE.match(k)]
+        for j in range(len(kids)):
+            kj, vj = kids[j]
+            if vj.get('touchable') is not False or vj.get('visible') is False:
+                continue
+            for i in range(j):
+                ki, vi = kids[i]
+                if vi.get('touchable') is not True or vi.get('visible') is False:
+                    continue
+                rj, ri = _rect(vj), _rect(vi)
+                if not rj or not ri:
+                    continue
+                ov = _overlap(rj, ri)
+                if ov > 0:
+                    found.append((kj, vj, ki, vi, ov))
+        for k, v in kids:
+            scan(v)
+
+    scan(d)
+    return found
+
+
+# 容器/画布类控件：压在可触摸控件上的常见形态是「遮罩层/蒙层」（而非装饰件误压）
+_DECO_CONTAINER = {'window', 'painter', 'scrollwindow', 'pagewindow'}
+
+
+def _deco_hint(deco_key, deco, covered, res=None):
+    """评估遮挡是否可能「故意」——返回 (possibly_intentional, [线索...])。
+
+    故意遮挡的常见形态（沛哥 2026-09-10 提醒）：弹窗/蒙层本来就该吃掉下层触摸，不是 bug。
+    线索：modal 弹窗 / 遮挡件是容器类（常见遮罩）/ 几乎完全覆盖被压控件 / 遮挡件整屏尺寸。
+    """
+    t = deco_key.split('__')[0]
+    hints = []
+    if deco.get('modal'):
+        hints.append('modal=true（弹窗拦截）')
+    if t in _DECO_CONTAINER:
+        hints.append('%s 容器（常见遮罩/蒙层）' % t)
+    d, c = _rect(deco), _rect(covered)
+    if d and c:
+        ov = _overlap(d, c)
+        carea = max(1, (c[2] - c[0]) * (c[3] - c[1]))
+        ratio = ov / carea
+        if ratio >= 0.9:
+            hints.append('几乎完全覆盖被压控件（%.0f%%）' % (ratio * 100))
+        if res and res[0] and res[1] and (d[2] - d[0]) >= res[0] and (d[3] - d[1]) >= res[1]:
+            hints.append('遮挡件为整屏尺寸（全局遮罩）')
+    return (bool(hints), hints)
+
+
+# ---------------- 资源产物核对（json 声明 → 文件存在 + PNG 尺寸 == 控件 position）----------------
+# 「产物 vs 声明」机器化（原为 temp/verify_demo_assets.py 人肉脚本，v0.27.32 固化）：
+# 单一实现，check_all #17 与 MCP op flythings_verify_assets 共用，禁止再各写一份。
+_PIC_REF_FIELDS = ('backgroundPic', 'progressPic', 'secondaryProgressPic', 'thumbPic')
+
+# 自动生成图统一放 <项目>/resources/images/（MEMORY 铁律 #9），json 引用写 images/xxx.png
+_AUTO_ASSET_DIR = 'images'
+
+
+def _is_auto_generated(ref):
+    """引用是否为「流水线自动生成图」——这类图**必须**与控件盒 1:1（唯一强制严格核对的情形）。
+
+    为什么区分（v0.27.33 实测修正，回应「产物核对形同虚设」）：
+      ① 自动生成图（html2json/gen_res 出的渐变/圆角/阴影/图标）几何信息烘在像素里，
+         尺寸 != 控件盒 → 圆角错位/阴影断边，这是 v0.27.30 事故的本质 → 必须 FAIL。
+      ② 手绘图（navi/fh.png 44x26 放在 72x40 按钮里、charge/bg.jpg 800x430 放 1024x550
+         window 里）是官方基准工程 SampleUI-New 就有的正常写法，引擎会拉伸到控件盒
+         → 尺寸不等属正常，只能 WARN，不能 FAIL。
+    判别：按铁律 #9，自动生成图一律在 resources/images/ 下（引用首段 = images）；
+    手绘图可放任意子目录（navi/、charge/、InputBox/ ...）。
+    """
+    p = (ref or '').replace('\\', '/').lstrip('./')
+    return p.split('/')[0].lower() == _AUTO_ASSET_DIR
+
+
+def _ctrl_pic_refs(v):
+    """控件内全部图片引用 [(字段名, 引用)]：backgroundPic / seekbar 四图 / picTab.pic0~picN。"""
+    out = []
+    for fld in _PIC_REF_FIELDS:
+        pv = v.get(fld)
+        if isinstance(pv, str) and pv:
+            out.append((fld, pv))
+    pt_ = v.get('picTab')
+    if isinstance(pt_, dict):
+        for fld, pv in pt_.items():
+            if isinstance(pv, str) and pv:
+                out.append(('picTab.%s' % fld, pv))
+    return out
+
+
+def verify_assets(project_root):
+    """核对「json 声明 vs 磁盘产物」：引用文件是否存在 + PNG 尺寸是否 == 控件 position。
+
+    为什么必须机器化：FlyThings 不缩放普通 PNG，图与控件盒不等即错位/裁切；
+    v0.27.30 的阴影三连 bug 正是「图没生成也没人发现」，靠人肉目测漏掉了。
+
+    返回可 JSON 序列化的 dict：
+      ok / pages / refCount / missing[] / mismatch[] / stretched[] / unresolved[] / warnings[] / noPil
+      - missing   ：字段引用了图片但文件不存在 → FAIL
+      - mismatch  ：**自动生成图**（resources/images/，铁律 #9）尺寸 != position → FAIL
+                    （.9.png 除外，9-patch 可拉伸）
+      - stretched ：手绘图尺寸 != 控件盒 → 仅提示（引擎会拉伸，基准工程 SampleUI-New 也这么用）
+      - unresolved：带 %s 格式化前缀 / json 解析失败 / 读图失败（仅提示）
+      - warnings  ：0 页等「其实什么都没核」的情况会写这里（不静默）
+    """
+    root = os.path.abspath(project_root)
+    ui = os.path.join(root, 'ui')
+    res = {'ok': True, 'projectRoot': root, 'pages': 0, 'refCount': 0,
+           'missing': [], 'mismatch': [], 'stretched': [], 'unresolved': [], 'warnings': [],
+           'noPil': not _HAS_PIL}
+    if not os.path.isdir(ui):
+        res['ok'] = False
+        res['error'] = 'ui 目录不存在: %s' % ui
+        return res
+    pages = _ui_pages(root)
+    res['pages'] = len(pages)
+    if not pages:
+        # 不静默：0 页时 ok=true 会让人以为「核对过了」——其实什么都没看
+        res['warnings'].append('ui/ 下没找到布局 json（支持 ui/*.json 与 ui/<分辨率>/*.json），'
+                               '本次未核对任何产物')
+    for p in pages:
+        page = os.path.relpath(p, root).replace('\\', '/')
+        try:
+            d = json.load(open(p, encoding='utf-8'))
+        except Exception as e:
+            res['unresolved'].append({'page': page, 'ref': '-', 'why': 'json 解析失败: %s' % e})
+            continue
+        for key, v in _all_controls(d):
+            pos = v.get('position') or {}
+            pw, ph = pos.get('width'), pos.get('height')
+            for fld, ref in _ctrl_pic_refs(v):
+                if '%s' in ref:
+                    res['unresolved'].append({'page': page, 'control': key, 'field': fld,
+                                              'ref': ref, 'why': '运行时格式化引用，跳过逐控件核对'})
+                    continue
+                res['refCount'] += 1
+                fp = _pic_path(root, ref)
+                if not fp:
+                    res['missing'].append({'page': page, 'control': key, 'field': fld, 'ref': ref})
+                    continue
+                if ref.lower().endswith('.9.png') or not _HAS_PIL or not pw or not ph:
+                    continue
+                try:
+                    with _Image.open(fp) as im:
+                        w, h = im.size
+                except Exception as e:
+                    res['unresolved'].append({'page': page, 'control': key, 'field': fld,
+                                              'ref': ref, 'why': 'PIL 读取失败: %s' % e})
+                    continue
+                if (w, h) != (pw, ph):
+                    row = {'page': page, 'control': key, 'field': fld, 'ref': ref,
+                           'png': [w, h], 'position': [pw, ph]}
+                    if _is_auto_generated(ref):
+                        res['mismatch'].append(row)      # 自动生成图必须 1:1 → FAIL
+                    else:
+                        res['stretched'].append(row)     # 手绘图引擎会拉伸 → 仅提示
+    res['ok'] = not (res.get('error') or res['missing'] or res['mismatch'])
+    if res['stretched']:
+        res['warnings'].append(
+            '%d 处手绘图尺寸 != 控件盒（引擎会拉伸，通常正常，仅供确认；'
+            '自动生成图才必须 1:1）：%s'
+            % (len(res['stretched']),
+               '；'.join('%s %s %dx%d!=%dx%d' % (r['control'], r['field'], r['png'][0], r['png'][1],
+                                                 r['position'][0], r['position'][1])
+                         for r in res['stretched'][:4])))
+    return res
+
+
+# ---------------- 设计令牌漂移检测（DESIGN.md 令牌 vs json 实际值，沛哥 2026-09-12）----------------
+# 口径：DESIGN.md 是「冻结的视觉真相」——json 里的颜色/字号应当来自令牌，不应当出现模板外的值。
+# 结构值例外（不经令牌）：0（透明）/ -1（未设）/ 16777215（纯白，平台默认文本色）；
+# 显式豁免：在 DESIGN.md 里写一行「漂移豁免: #RRGGBB 18 24」即视为已批准（便于单点例外留痕）。
+_HEX_RE = re.compile(r'#[0-9A-Fa-f]{6}\b')
+_NUM_RE = re.compile(r'(?<![\w.])-?\d+(?![\w.])')
+_COLOR_SEC_HINT = ('色彩令牌', '色彩', 'color token')
+_FONT_SEC_HINT = ('字号阶梯', '字号')
+_SPACE_SEC_HINT = ('间距梯度', '间距')
+_HERO_HINT = ('hero', 'Hero', 'HERO')
+_EXEMPT_HINT = ('漂移豁免', '令牌豁免')
+_STRUCT_COLORS = {0, -1, 16777215}
+_COLOR_FIELDS = ('backgroundColor', 'textColor', 'clockColor', 'penColor', 'hintTextColor',
+                 'borderColor', 'progressColor')
+
+
+def _hexstr(v):
+    return '#%06X' % (v & 0xFFFFFF)
+
+
+def _md_sections(text):
+    """按 '## ' 标题切分 DESIGN.md → {标题: 正文}。"""
+    out = {}
+    cur = ''
+    buf = []
+    for line in text.splitlines():
+        if line.startswith('## '):
+            if cur:
+                out[cur] = '\n'.join(buf)
+            cur = line[3:].strip()
+            buf = []
+        else:
+            buf.append(line)
+    if cur:
+        out[cur] = '\n'.join(buf)
+    return out
+
+
+def _parse_design_tokens(text):
+    """解析 DESIGN.md → (colors, fonts, spacing, exempt)，空集合表示该项未填。"""
+    secs = _md_sections(text)
+    colors, fonts, spacing, exempt = set(), set(), set(), set()
+    for title, body in secs.items():
+        if any(h in title for h in _COLOR_SEC_HINT):
+            for m in _HEX_RE.finditer(body):
+                colors.add(int(m.group(0)[1:], 16))
+        if any(h in title for h in _FONT_SEC_HINT):
+            for row in body.splitlines():
+                if not row.strip().startswith('|'):
+                    continue
+                for n in _NUM_RE.findall(row):
+                    v = int(n)
+                    if 8 <= v <= 400:
+                        fonts.add(v)
+        if any(h in title for h in _SPACE_SEC_HINT):
+            for row in body.splitlines():
+                for n in _NUM_RE.findall(row):
+                    v = int(n)
+                    if 0 < v <= 400:
+                        spacing.add(v)
+    for line in text.splitlines():
+        if any(h in line for h in _HERO_HINT):
+            for n in _NUM_RE.findall(line):
+                v = int(n)
+                if 8 <= v <= 400:
+                    fonts.add(v)
+        if any(h in line for h in _EXEMPT_HINT):
+            for m in _HEX_RE.finditer(line):
+                colors.add(int(m.group(0)[1:], 16))
+            for n in _NUM_RE.findall(line):
+                exempt.add(int(n))
+    return colors | exempt, fonts | exempt, spacing, exempt
+
+
+def _collect_json_colors_fonts(node, out_colors, out_fonts, path=''):
+    """递归收集 json 里的颜色字段与字号（控件键下的 color* / fontSize / textSize）。"""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            p = ('%s.%s' % (path, k)) if path else k
+            if isinstance(v, dict):
+                _collect_json_colors_fonts(v, out_colors, out_fonts, p)
+            elif isinstance(v, list):
+                for i, it in enumerate(v):
+                    _collect_json_colors_fonts(it, out_colors, out_fonts, '%s[%d]' % (p, i))
+            elif isinstance(v, int) and not isinstance(v, bool):
+                if k in _COLOR_FIELDS or (k.startswith('color') and k[5:].isdigit()):
+                    out_colors.append((_ctrl_path(p), k, v))
+                elif k in ('fontSize', 'textSize'):
+                    out_fonts.append((_ctrl_path(p), k, v))
+    return out_colors, out_fonts
+
+
+def _ctrl_path(p):
+    """把 'tv位置.子键.字段' 压成 '控件键.字段'，便于报错定位。"""
+    parts = p.split('.')
+    for i in range(len(parts) - 1):
+        if _CTRL_KEY_RE.match(parts[i]):
+            return '%s.%s' % (parts[i], parts[-1])
+    return p
+
+
+def _sibling_gaps(node, out, path='root'):
+    """同容器内相邻同级控件的纵向间距（用于间距梯度核对），返回 [(gap, 容器路径)]。"""
+    if not isinstance(node, dict):
+        return out
+    items = []
+    for k, v in node.items():
+        if isinstance(v, dict) and _CTRL_KEY_RE.match(k):
+            r = _rect(v)
+            if r:
+                items.append((r[1], r[3], k))
+    items.sort()
+    for i in range(1, len(items)):
+        gap = items[i][0] - items[i - 1][1]
+        if gap > 0:
+            out.append((gap, path))
+    for k, v in node.items():
+        if isinstance(v, dict) and '__' in k:
+            _sibling_gaps(v, out, k)
+    return out
+
+
+def verify_design_tokens(project_root):
+    """DESIGN.md 令牌 vs json 实际值（漂移检测）。返回 {status, note, colors, fonts, gaps, scanned, tokens, ok}。"""
+    res = {'status': 'ok', 'note': '', 'colors': [], 'fonts': [], 'gaps': {},
+           'scanned': 0, 'tokens': {}, 'ok': True}
+    md = os.path.join(project_root, 'DESIGN.md')
+    if not os.path.isfile(md):
+        res['status'] = 'skip'
+        res['note'] = ('未见 DESIGN.md（新项目第一版视觉应当有：见 skill flythings-ui-dev / '
+                       'templates/DESIGN.md）；存量工程可忽略')
+        return res
+    text = open(md, encoding='utf-8').read()
+    colors, fonts, spacing, _exempt = _parse_design_tokens(text)
+    if len(colors) < 2 or not fonts:
+        res['status'] = 'incomplete'
+        res['note'] = ('DESIGN.md 令牌表未填全（解析到 颜色 %d 个 / 字号 %d 个），跳过漂移检测；'
+                       '按 templates/DESIGN.md 填「色彩令牌 + 字号阶梯」后再跑' % (len(colors), len(fonts)))
+        return res
+    allowed_c = colors | _STRUCT_COLORS
+    ui = os.path.join(project_root, 'ui')
+    for f in _ui_pages(project_root):
+        rel = 'ui/' + os.path.relpath(f, ui).replace('\\', '/')
+        d = json.load(open(f, encoding='utf-8'))
+        got_c, got_f = _collect_json_colors_fonts(d, [], [])
+        for ctrl, fld, v in got_c:
+            if v not in allowed_c:
+                res['colors'].append((rel, ctrl, fld, v))
+        for ctrl, fld, v in got_f:
+            if v not in fonts:
+                res['fonts'].append((rel, ctrl, fld, v))
+        if spacing:
+            for gap, where in _sibling_gaps(d, []):
+                res['gaps'][gap] = res['gaps'].get(gap, 0) + 1
+        res['scanned'] += 1
+    res['gaps'] = dict(sorted((g, c) for g, c in res['gaps'].items() if g not in spacing))
+    res['tokens'] = {'colors': sorted(colors), 'fonts': sorted(fonts), 'spacing': sorted(spacing)}
+    res['ok'] = not res['colors'] and not res['fonts']
+    return res
+
+
+# ---------------- 19. V85X：视频解码返回后必须 releaseLayer（防黑屏）----------------
+# 沛哥 2026-09-14 定：平台匹配（V85X 系 disp 分层平台）时，视频解码返回后必须释放残留 disp 层，
+# 否则残留视频层不关 → 屏幕黑屏；**开发与 check 验收都必须做这个**。
+# 参考实现：knowledge/v85x/display-layer-debug.md §2（/dev/disp + DISP_LAYER_GET/SET_CONFIG，
+# 只关非 UI 层（跳过 ARGB 格式层），有开机动画时用 /tmp/zk_boot_anim 存在性保护）。
+_VIDEO_DECODE_MARKERS = (
+    'h264_player.h', 'vdecoder.h', 'VideoDecoder',
+    'mi_vdec', 'CedarX', 'sunxi_display2',
+)
+_LAYER_RELEASE_MARKERS = (
+    'DISP_LAYER_SET_CONFIG', 'DISP_LAYER_GET_CONFIG', '/dev/disp',
+    'release_layer', 'releaseLayer', 'ReleaseLayer', 'hwdisplay.h',
+)
+_SRC_SKIP_DIRS = ('dependencies', 'lib-no-link', '.fun', '.fuse', 'Release', 'build')
+
+
+def _manifest_platform(root):
+    """读 Manifest.xml 的 platform 属性（找不到返回空串）。"""
+    p = os.path.join(root, 'Manifest.xml')
+    if not os.path.isfile(p):
+        return ''
+    try:
+        m = re.search(r'<manifest\b[^>]*\bplatform\s*=\s*"([^"]+)"',
+                      open(p, encoding='utf-8', errors='replace').read())
+        return m.group(1).strip().upper() if m else ''
+    except Exception:
+        return ''
+
+
+def _scan_src(root, markers):
+    """扫 src/ 下级源码里出现过的标记 → {marker: [相对文件...]}。
+    读不了的文件不静默吞：记入返回体第二个元素（调用方可提示）。"""
+    hits, unread = {}, []
+    src = os.path.join(root, 'src')
+    if not os.path.isdir(src):
+        return hits, unread
+    for dirpath, dirnames, filenames in os.walk(src):
+        dirnames[:] = [d for d in dirnames if d not in _SRC_SKIP_DIRS]
+        for fn in filenames:
+            if os.path.splitext(fn)[1].lower() not in ('.c', '.cc', '.cpp', '.h', '.hpp'):
+                continue
+            fp = os.path.join(dirpath, fn)
+            rel = os.path.relpath(fp, root).replace('\\', '/')
+            try:
+                txt = open(fp, encoding='utf-8', errors='replace').read()
+            except OSError as e:
+                unread.append('%s(%s)' % (rel, e.__class__.__name__))
+            else:
+                for mk in markers:
+                    if mk in txt:
+                        hits.setdefault(mk, []).append(rel)
+    return hits, unread
+
+
+def _count_src(root, markers):
+    """统计标记在 src/ 下出现次数（用字符计数，不看文件数）。读失败的文件跳过（已在 _scan_src 侧报）。"""
+    total = {}
+    src = os.path.join(root, 'src')
+    if not os.path.isdir(src):
+        return total
+    for dirpath, dirnames, filenames in os.walk(src):
+        dirnames[:] = [d for d in dirnames if d not in _SRC_SKIP_DIRS]
+        for fn in filenames:
+            if os.path.splitext(fn)[1].lower() not in ('.c', '.cc', '.cpp', '.h', '.hpp'):
+                continue
+            try:
+                txt = open(os.path.join(dirpath, fn), encoding='utf-8', errors='replace').read()
+            except OSError as e:
+                print('  [NOTE] 读取失败跳过统计：%s (%s)' % (fn, e.__class__.__name__))
+            else:
+                for mk in markers:
+                    n = txt.count(mk)
+                    if n:
+                        total[mk] = total.get(mk, 0) + n
+    return total
+
+
+def check_v85x_release_layer(root):
+    """V85X 视频解码返回后是否做了图层释放（返回 dict: status/ok/detail/note）。"""
+    plat = _manifest_platform(root)
+    if not plat:
+        return {'status': 'skip', 'note': 'Manifest.xml 无 platform 属性，无法判定平台'}
+    if 'V85X' not in plat and 'V853' not in plat and 'V851' not in plat and 'V553' not in plat:
+        return {'status': 'skip', 'note': '平台 %s 非 V85X 系（disp 分层平台不适用）' % plat}
+    dec, dec_unread = _scan_src(root, _VIDEO_DECODE_MARKERS)
+    rel, rel_unread = _scan_src(root, _LAYER_RELEASE_MARKERS)
+    if not dec:
+        extra = '（%d 个源码文件读取失败：%s）' % (len(dec_unread), '、'.join(dec_unread[:3])) if dec_unread else ''
+        return {'status': 'skip', 'note': '平台 %s，但 src/ 未见视频解码用法（无需图层释放）%s' % (plat, extra)}
+    dec_files = sorted(set(f for v in dec.values() for f in v))
+    if rel:
+        rel_files = sorted(set(f for v in rel.values() for f in v))
+        # 2026-09-14 V851 真机实测：用「格式区间（ARGB_8888~BGRA_5551）判 UI 层」会漏关残留层
+        # （RGB_888=0x08 落在区间内被误判；COLOR 层 fb.format 读出来就是 color 低字节）→ 提醒改 ch/lyr。
+        fmt_hits = _scan_src(root, ('DISP_FORMAT_ARGB_8888', 'DISP_FORMAT_BGRA_5551'))[0]
+        unsafe = sorted(set(fmt_hits.get('DISP_FORMAT_ARGB_8888', []))
+                        & set(fmt_hits.get('DISP_FORMAT_BGRA_5551', [])))
+        # 2026-09-14 沛哥：用到视频图层的产品「启动第一次初始化」必须先释放图层（崩溃重启残留 -> 屏幕永久性异常）
+        # → 实现存在不代表调到了：名字只出现 1 次（只有定义、没启动路径调用）就提醒。
+        name_cnt = sum(_count_src(root, ('release_layer', 'releaseLayer', 'ReleaseLayer')).values())
+        nocall = name_cnt <= 1
+        return {'status': 'ok', 'ok': True, 'unsafe': unsafe, 'nocall': nocall,
+                'detail': '已做（解码用法 %s；释放实现 %s）%s'
+                          % ('、'.join(dec_files[:3]), '、'.join(rel_files[:3]),
+                             '；⚠️ 释放函数名只出现 %d 次（疑似只定义未调用/未在启动初始化路径调用）'
+                             % name_cnt if nocall else '')}
+    miss = sorted(set(dec_unread + rel_unread))
+    return {'status': 'ok', 'ok': False,
+            'detail': '缺失！平台 %s + 视频解码（%s）但未见 disp 图层释放 → '
+                      '残留视频层不关会黑屏。修复：视频解码返回后关闭除 UI 层外的 disp 层'
+                      '（open("/dev/disp") + DISP_LAYER_GET_CONFIG/SET_CONFIG 置 enable=0，'
+                      '跳过 ARGB 格式的 UI 层；有开机动画时用 /tmp/zk_boot_anim 存在性保护），'
+                      '可直接复用 knowledge/v85x/display-layer-debug.md §2 的实现%s'
+                      % (plat, '、'.join(dec_files[:3]),
+                         '（%d 个源码文件读取失败，建议人工复核：%s）' % (len(miss), '、'.join(miss[:3])) if miss else '')}
 
 
 def main(project_root):
@@ -228,7 +741,8 @@ def main(project_root):
         print(f'[X] ui 目录不存在: {ui}')
         sys.exit(1)
 
-    PAGES = sorted(['ui/' + os.path.basename(f) for f in glob.glob(os.path.join(ui, '*.json'))])
+    PAGES = sorted('ui/' + os.path.relpath(f, ui).replace('\\', '/')
+                   for f in _ui_pages(root))
     LOGICS = sorted(['src/logic/' + os.path.basename(f)
                      for f in glob.glob(os.path.join(root, 'src', 'logic', '*.cc'))])
     if not PAGES:
@@ -525,7 +1039,124 @@ def main(project_root):
                         chk(k + '.item', it, 'slideitem')
         log(not missing, '%s 字段全集 %s' % (f, '；'.join(missing[:15]) if missing else '齐全'))
 
+    print('== 15. 装饰件遮挡可触摸控件（WARN 需人工审批；含「可能故意遮挡」评估）==\n'
+          '      口径：同层后定义（z 更高）且 touchable=false 的控件压在 touchable=true 控件之上。\n'
+          '      两类可能：① 误压（装饰件/布局失误）→ 需运行期 setTouchPass(true)；\n'
+          '      ② 故意遮挡（蒙层/禁用态/防盗点：modal 弹窗、容器遮罩、整屏遮罩、完全覆盖）→ 本就有意，忽略。')
+    for f in PAGES:
+        d = json.load(open(os.path.join(root, f), encoding='utf-8'))
+        found = _deco_blockers(d)
+        if not found:
+            print('  [PASS] %s 无装饰件遮挡' % f)
+            continue
+        _r = d.get('resolution') or {}
+        res = (_r.get('width'), _r.get('height')) if _r.get('width') else None
+        for kj, vj, ki, vi, ov in found[:8]:
+            kdcap = vj.get('caption') or ''
+            kcap = vi.get('caption') or ki
+            ppt = 'm%sPtr' % kdcap if kdcap else kj
+            c = _rect(vi)
+            ratio = 100.0 * ov / max(1, (c[2] - c[0]) * (c[3] - c[1])) if c else 0
+            detail = ('%s 装饰件 %s(%s) 压在 %s 之上（重叠 %dpx2 = 被压控件的 %.0f%%，touchable=false）'
+                      % (f, kj, kdcap or '-', kcap, ov, ratio))
+            probably, hints = _deco_hint(kj, vj, vi, res)
+            if probably:
+                warn('%s [可能有意遮挡：%s] → 若确认是故意挡（禁用态/蒙层/防盗点）忽略本条；'
+                     '若确需下层可交互，再补 %s->setTouchable(false); %s->setTouchPass(true);'
+                     % (detail, '、'.join(hints), ppt, ppt))
+            else:
+                warn('%s [疑似误压] → 修复：onUI_init 中 %s->setTouchable(false); %s->setTouchPass(true);'
+                     '（否则下层拖不动/点不响应，touch-events.md 1）' % (detail, ppt, ppt))
+        if len(found) > 8:
+            warn('%s 另有 %d 处同类遮挡，未逐条列出' % (f, len(found) - 8))
+
+    print('== 16. 代码层 setTouchable(false) 是否配套 setTouchPass(true)（WARN）==')
+    for f in LOGICS:
+        code2 = re.sub(r'//[^\n]*', '', open(os.path.join(root, f), encoding='utf-8').read())
+        hits = set(re.findall(r'([A-Za-z_]\w*)\s*->\s*setTouchable\s*\(\s*false\s*\)', code2))
+        miss = [v for v in sorted(hits)
+                if not re.search(re.escape(v) + r'\s*->\s*setTouchPass\s*\(\s*true\s*\)', code2)]
+        if miss:
+            warn('%s 有 setTouchable(false) 但未见同对象 setTouchPass(true)：%s → 修复：在该控件设置处补 %s'
+                 % (f, '、'.join(miss), ' ；'.join('%s->setTouchPass(true);' % v for v in miss)))
+        else:
+            print('  [PASS] %s 触摸穿透配套' % f)
+
+    print('== 17. 资源产物核对（引用存在 + 自动生成图 PNG 尺寸 == 控件 position）==')
+    va = verify_assets(root)
+    if va.get('error'):
+        log(False, '产物核对 %s' % va['error'])
+    else:
+        log(not va['missing'], '图片引用存在性（%d 个页面 / %d 处引用）%s'
+            % (va['pages'], va['refCount'],
+               '全部存在' if not va['missing'] else '缺 %d 个：%s'
+               % (len(va['missing']), '；'.join('%s %s' % (m['control'], m['field']) for m in va['missing'][:6]))))
+        log(not va['mismatch'], 'PNG 尺寸 == 控件 position（自动生成图）%s'
+            % ('全部匹配' if not va['mismatch'] else '不匹配 %d 处：%s'
+               % (len(va['mismatch']),
+                  '；'.join('%s.%s %dx%d != %dx%d'
+                            % (m['control'], m['field'], m['png'][0], m['png'][1],
+                               m['position'][0], m['position'][1]) for m in va['mismatch'][:6]))))
+        if va.get('stretched'):
+            print('  [NOTE] %d 处手绘图尺寸 != 控件盒（引擎会拉伸，通常正常）：%s'
+                  % (len(va['stretched']),
+                     '；'.join('%s.%s %dx%d != %dx%d'
+                               % (m['control'], m['field'], m['png'][0], m['png'][1],
+                                  m['position'][0], m['position'][1])
+                               for m in va['stretched'][:5])))
+        if va['unresolved']:
+            print('  [NOTE] %d 处跳过（运行时格式化引用/读图失败），见 flythings_verify_assets 明细'
+                  % len(va['unresolved']))
+
+    print('== 18. 设计令牌漂移检测（DESIGN.md 令牌 vs json 实际值；沛哥 2026-09-12）==\n'
+          '      口径：DESIGN.md 冻结视觉真相，json 颜色/字号应来自令牌；结构值例外 0/-1/16777215；\n'
+          '      单项例外写一行「漂移豁免: #RRGGBB 18」留痕。无 DESIGN.md / 令牌表未填 → NOTE 跳过。')
+    dt = verify_design_tokens(root)
+    if dt['status'] in ('skip', 'incomplete'):
+        print('  [NOTE] 跳过：%s' % dt['note'])
+    else:
+        tk = dt.get('tokens') or {}
+        log(dt['ok'], '令牌漂移 色值 %d 处 / 字号 %d 处（%d 页；令牌：色 %d / 字 %d）%s'
+            % (len(dt['colors']), len(dt['fonts']), dt['scanned'],
+               len(tk.get('colors', [])), len(tk.get('fonts', [])),
+               '，全部在令牌内' if dt['ok'] else '：'
+               + '；'.join('%s %s.%s=%s' % (p, c, fld, _hexstr(v))
+                           for p, c, fld, v in dt['colors'][:6])
+               + '；'.join('%s %s.%s=%d' % (p, c, fld, v)
+                           for p, c, fld, v in dt['fonts'][:4])))
+        if dt['gaps']:
+            warn('间距梯度外的纵向间距 %d 种（芯距/对齐可能正常，请人工确认；间距梯度=%s）：%s'
+                 % (len(dt['gaps']), ','.join(str(s) for s in tk.get('spacing', [])),
+                    '、'.join('%dpx×%d' % (g, c) for g, c in list(dt['gaps'].items())[:8])))
+
+    print('== 19. V85X 视频解码返回后必须 releaseLayer（防黑屏；沛哥 2026-09-14 定：\n'
+          '      平台匹配时开发与 check 验收都必须做，参考 knowledge/v85x/display-layer-debug.md §2）==')
+    rl = check_v85x_release_layer(root)
+    if rl['status'] == 'skip':
+        print('  [NOTE] 跳过：%s' % rl['note'])
+    else:
+        log(rl['ok'], 'V85X 图层释放 %s' % rl['detail'])
+        if rl.get('nocall'):
+            warn('V85X 图层释放：src/ 里释放函数名只出现一次（疑似只定义未调用）——\n'
+                 '          沛哥 2026-09-14 定：用到视频图层的产品**启动第一次初始化就必须先释放图层**，\n'
+                 '          否则程序崩溃/重启后残留的系统级 disp 图层不会被清理 → **屏幕永久性异常**\n'
+                 '          （真机实测：杀进程重启后残留黑层仍在）。修复：在启动初始化路径里调一次释放\n'
+                 '          函数（如 sys::hw::init() / onUI_init），详见 knowledge/v85x/display-layer-debug.md §2-0/§2-1-3')
+        if rl.get('unsafe'):
+            warn('V85X 图层释放用「格式区间（DISP_FORMAT_ARGB_8888 ~ DISP_FORMAT_BGRA_5551）判定 UI 层」'
+                 '（%s）→ 2026-09-14 V851 真机实测会漏关残留层：RGB_888(0x08) 落在区间内被误判为 UI 层、'
+                 'COLOR 模式层读出的 fb.format 就是 color 低字节 → 黑层/残留层留在最上面 = 一直黑屏。'
+                 '修复：改按 ch/layer 跳过 UI 层（if (ch == UI_LYCHN && lyl == UI_LYLAY) continue;），'
+                 '要双重保险就限定 mode == LAYER_MODE_BUFFER 后才看 format。'
+                 '详见 knowledge/v85x/display-layer-debug.md §2-1-1'
+                 % '、'.join(rl['unsafe'][:3]))
+
     print()
+    if warnings:
+        print('[!] %d 条 WARN 需人工审批（不影响 PASS/FAIL；逐条判断是「误压」还是「故意遮挡」，'
+              '故意遮挡可忽略；需交互则补 setTouchPass(true) 或调整层叠顺序）：' % len(warnings))
+        for w in warnings:
+            print('   -', w)
     if failures:
         print('[X] %d 项 FAIL，修复后再交付：' % len(failures))
         for f in failures:

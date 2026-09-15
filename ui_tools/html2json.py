@@ -162,6 +162,58 @@ def _glyph_from_attrs(attrs):
     return None
 
 
+def _px_num(v):
+    """CSS 长度 → 数值：'4px'/'4'/'4.5em'/'50%' → float；非法返回 None。
+    ⚠️ 2026-09-10 修 bug：原先 int(float('4px')) 抛 ValueError，被 except 静默吞掉，
+    导致「标准 CSS 写 px 的 box-shadow 一律转图失败、且报误导性提示」。"""
+    m = re.match(r'^\s*(-?\d+(?:\.\d+)?)\s*(?:px|em|rem|pt|%)?\s*$', str(v))
+    return float(m.group(1)) if m else None
+
+
+def _shadow_spec(style):
+    """box-shadow → (ox, oy, blur, (r,g,b,a))；解析不了返回 None。
+    兼容 px/em/rem/%/无单位、inset/outset、4 值 spread、色值写在任意位置。"""
+    m = re.search(r'box-shadow\s*:\s*([^;]+)', style or '')
+    if not m:
+        return None
+    raw = m.group(1).strip()
+    if not raw or raw.lower().startswith('none'):
+        return None
+    toks = [t for t in raw.split() if t.lower() not in ('inset', 'outset')]
+    nums = []
+    for t in toks:
+        if len(nums) >= 3:
+            break
+        v = _px_num(t)
+        if v is None:
+            break
+        nums.append(v)
+    if len(nums) < 3:
+        return None
+    col = None
+    for t in toks[len(nums):]:
+        c = _css_color(t)
+        if c:
+            col = c
+            break
+    return (int(nums[0]), int(nums[1]), int(abs(nums[2])), col or (0, 0, 0, 80))
+
+
+def _shadow_pad(ox, oy, blur):
+    """阴影画布外扩量（必须与 gen_res.gen_shadow_card 内部 pad 公式一致）。"""
+    return max(2, int(blur) + max(abs(int(ox)), abs(int(oy))))
+
+
+def _grow(pos, pad):
+    """控件盒按阴影溢出量 pad 外扩：left/top 前移、宽高各 +2*pad。
+    这样「图片尺寸 == 控件尺寸」（check_all #11），且可见卡片主体仍落在作者给定坐标。"""
+    pad = int(pad)
+    pos['left'] = pos.get('left', 0) - pad
+    pos['top'] = pos.get('top', 0) - pad
+    pos['width'] = pos.get('width', 100) + pad * 2
+    pos['height'] = pos.get('height', 40) + pad * 2
+
+
 def _color_int_rgba(cint, default=None):
     """十进制颜色 int → (r,g,b,255)；失败返回 default。"""
     if cint is None:
@@ -478,13 +530,12 @@ class HtmlToJson:
                     out['backgroundPic'] = pic
 
         # 2. box-shadow → 阴影卡片图（圆角 + 阴影；已有渐变底则阴影叠加到渐变图上）
-        sm = re.search(r'box-shadow\s*:\s*([^;]+)', style)
-        if sm:
-            parts = sm.group(1).strip().split()
-            if len(parts) >= 4:
+        sh_spec = _shadow_spec(style)
+        if sh_spec:
+            if True:   # 保住原缩进层级（历史上这里 try 的缩进=16）
                 try:
-                    ox, oy, blur = int(float(parts[0])), int(float(parts[1])), int(float(parts[2]))
-                    sc = _css_color(parts[3]) or (0, 0, 0, 80)
+                    ox, oy, blur, sc = sh_spec
+                    pad = _shadow_pad(ox, oy, blur)
                     rm = re.search(r'border-radius\s*:\s*(\d+)px', style)
                     radius = int(rm.group(1)) if rm else 8
                     radius = min(radius, min(w, h) // 2)
@@ -517,13 +568,18 @@ class HtmlToJson:
                         name = f'shadow_{cap or ctx.n}_{self.gen_count}.png'
 
                         def _s(d, _n=name, _w=w, _h=h, _r=radius, _f=fill, _sh=(ox, oy, blur, sc)):
-                            return gr.gen_shadow_card(d, _n, _w, _h, _r, _f, shadow=_sh)
+                            # crop=False：保留完整画布 → 尺寸恒为 (w+2pad)x(h+2pad)，
+                            # 主体卡落在 (pad, pad)，调用方 _grow 后「图==控件」精确对位
+                            return gr.gen_shadow_card(d, _n, _w, _h, _r, _f, shadow=_sh, crop=False)
 
                         pic = self._gen_asset(_s)
                         if pic:
                             out['backgroundPic'] = pic
-                except Exception:
-                    pass
+                            out['pad'] = pad   # 图比控件大 2*pad → 调用方必须 _grow 控件盒
+                except Exception as e:
+                    # 不静默：转图失败要说清原因（2026-09-10 前这里是 except: pass，极难排查）
+                    ctx.warnings.append(
+                        f'{cap or ctx.n}: box-shadow 转图失败（{type(e).__name__}: {e}），已忽略该阴影')
 
         # 3. emoji 图标 → PNG（仅纯 emoji 文本转图标 textview；混合文本由 _leaf/_clean_text 剥离 emoji 保留文字）
         raw_text = re.sub(r'[ \t\r\f\v]+', ' ', node.text).strip()
@@ -684,17 +740,59 @@ class HtmlToJson:
         ('transform', '变换/旋转'), ('filter', '滤镜'), ('opacity', '透明度'),
     )
 
+    def _convertible_effects(self, node, style, hit):
+        """本次会被 gen_res 自动烘焙成图的效果名（与 _effect_assets 同一套条件）。
+
+        为什么要算（v0.27.33 修「误导提示」）：转图能力可用时，线性渐变/阴影+圆角/loading 动画
+        本来就会自动出图并写进 json（实测 grad_/shadow_/loading_*.png + backgroundPic/playFile），
+        旧文案却一律喊「无法硬转，请切图」——让 AI 以为转图失败了、白做一轮手工切图。
+        """
+        if not (_HAS_GEN_RES and getattr(self, 'asset_dir', None)):
+            return set()
+        cls = _classes(node.attrs)
+        out = set()
+        # 线性渐变 → gen_res 渐变图（径向渐变不支持，实测不转）
+        if 'linear-gradient' in style and 'radial-gradient' not in style:
+            out.add('线性渐变')
+        # 卡片阴影 + 圆角 → 一并烘焙成带外描的 PNG（文字阴影不在其中）
+        if _shadow_spec(style):
+            out.add('圆角')
+            if 'text-shadow' not in style:
+                out.add('阴影')
+        # loading/spinner 式动画 → 序列帧 GIF（imageanim）
+        if ('loading' in cls or 'spinner' in cls or
+                (re.search(r'animation\s*:', style) and
+                 ('spin' in style or 'rotate' in style or 'loading' in style))):
+            out.add('动画')
+        return {h for h in hit if h in out}
+
     def _warn_css_effects(self, ctx, node):
-        """检测 style 里的 CSS 效果属性：FlyThings 无 CSS 引擎，不硬转，
-        提示转图片（PNG/.9.png/序列帧/GIF）后用 data-pic 引用（转图 + 控件）。"""
+        """检测 style 里的 CSS 效果属性：能自动转图的说明「已转图」，转不了的提示切图。
+
+        两类分开说：
+          - 已转图（渐变/阴影+圆角/loading 动画）→ 信息提示，避免 AI 白做手工切图
+          - 转不了（径向渐变/文字阴影/变换/滤镜/透明度/过渡）→ 保留「请切图 + data-pic」指引
+        """
+        if _attr(node.attrs, 'data-pic'):
+            return   # 作者已按规范切图（data-pic）引用，效果就在图里，不必再提示
         style = _attr(node.attrs, 'style') or ''
         if not style:
             return
         hit = [name for pat, name in self._CSS_EFFECT_PATTERNS if pat in style]
-        if hit:
-            cls = _attr(node.attrs, 'class') or ''
+        if not hit:
+            return
+        conv = self._convertible_effects(node, style, hit)
+        rest = [h for h in hit if h not in conv]
+        cls = _attr(node.attrs, 'class') or ''
+        if conv:
             ctx.warnings.append(
-                f'<{node.tag} class="{cls}"> 含 CSS 效果（{"、".join(hit)}）：'
+                f'<{node.tag} class="{cls}"> 的 CSS 效果（{"、".join(sorted(conv))}）**已自动转成图片**'
+                f'（PNG/序列帧，尺寸 == 控件盒，json 已引用 images/*.png）；FlyThings 没有 CSS 引擎，'
+                f'改外观请改图或控件属性，不要指望写 CSS 生效。'
+                f'（若该控件类型没生成对应图，再用 data-pic 自备图（PNG，尺寸 == 控件盒））')
+        if rest:
+            ctx.warnings.append(
+                f'<{node.tag} class="{cls}"> 含 CSS 效果（{"、".join(rest)}）：'
                 f'FlyThings 不支持 CSS，无法硬转；请切图（PNG/.9.png/序列帧/GIF）后 '
                 f'用 data-pic 引用（效果转图片 + 控件组合实现）')
 
@@ -885,6 +983,20 @@ class HtmlToJson:
             eff = self._effect_assets(ctx, node, pos.get('width', 100), pos.get('height', 40), cap)
             if eff.get('backgroundPic'):
                 c['backgroundPic'] = eff['backgroundPic']
+                if eff.get('pad'):
+                    # 阴影图画布比控件大 2*pad：控件盒同步外扩 + 子控件坐标由 _pos() 补偿 +pad
+                    # → 图==控件 1:1（check_all #11），可见卡片主体仍落在作者给定坐标
+                    _grow(pos, eff['pad'])
+                    c['__pad'] = eff['pad']
+                    # ⚠️ 2026-09-11：阴影图带透明外扩边，控件底色必须取**页面底色** ——
+                    # 否则整块外扩区被控件底色（本例白）填满 → 阴影渐变/圆角都看不出来。
+                    # 卡体填充色已烘焙进阴影图，不需要控件再填一次。
+                    root_bg = (ctx.root or {}).get('backgroundColor')
+                    if root_bg is not None:
+                        c['backgroundColor'] = root_bg
+                    ctx.warnings.append(
+                        f'{cap}: box-shadow → 阴影图 {pos["width"]}x{pos["height"]}'
+                        f'（含 {eff["pad"]}px 阴影外扩）；控件盒已外扩、子控件已补偿，无需手工调整')
         c['__container'] = True
         key = ctx.add('window', c)   # 支持嵌套（scrollwindow 内嵌 window、window 内嵌 window）
         ctx.stack.append(c)
@@ -1108,9 +1220,11 @@ class HtmlToJson:
         attrs = node.attrs
         cap = self._caption(ctx, 'radiogroup', attrs)
         # basedemo radiogroup 7 键 100%：backgroundColor/touchable/visible 含默认显式；radiobuttons[] 内嵌子项
+        # touchable 必须 True（沛哥 2026-09-10 修正）：radiogroup 是「容器显式 false」口径的例外——
+        # 写 False 会让整组收不到触摸、点了没反应（单选组点不动）。详见 knowledge/uicontrols/touch-events.md
         c = {'backgroundColor': -1, 'caption': cap, 'id': ctx.nid('radiogroup'),
              'position': self._pos(attrs),
-             'touchable': False, 'visible': True,
+             'touchable': True, 'visible': True,
              '__container': True, '__radiogroup': True, 'radiobuttons': []}
         key = ctx.add('radiogroup', c)   # 支持嵌套（radiogroup 在 window 内）
         ctx.stack.append(c)
@@ -1218,6 +1332,8 @@ class HtmlToJson:
             if eff.get('backgroundPic'):
                 c['backgroundPic'] = eff['backgroundPic']
                 c.pop('bgColorTab', None)   # 有图不用底色（透明角图会透底色）
+                if eff.get('pad'):
+                    _grow(pos, eff['pad'])   # 叶子无子控件：只外扩自身，保证图==控件尺寸
             if eff.get('imageanim'):
                 # loading → 动图控件（imageanim__N, ZKImageAnim）：demo json 用 playFile 字段（设备自动播放）
                 typ = 'imageanim'
@@ -1299,6 +1415,8 @@ class HtmlToJson:
                     eff = self._effect_assets(ctx, node, pos.get('width', 100), pos.get('height', 40), cap)
                     if eff.get('backgroundPic'):
                         c['picTab'] = {'pic0': eff['backgroundPic'], 'pic1': eff['backgroundPic']}
+                        if eff.get('pad'):
+                            _grow(pos, eff['pad'])   # 叶子：只外扩自身，保证图==控件尺寸
             if 'picTab' in c or 'backgroundPic' in c:
                 c.pop('bgColorTab', None)   # 图片按钮不放底色（透明角会透出底色，图片叠色效果错乱）
             # 图标按钮 padding（Button1 demo）：data-icon-w/h 图标尺寸 + data-pad 间隙 → iconPosition
@@ -1705,6 +1823,17 @@ class HtmlToJson:
                     if pv is not None:
                         pos[k] = pv
                         break
+        # 父级阴影外扩补偿（2026-09-10）：window 因阴影图外扩了 pad，子控件是父相对坐标
+        # → 必须 +pad 才能落在可见卡片体内；listview 行内 subItem 相对行坐标，不再累加。
+        ctx = getattr(self, 'ctx', None)
+        if ctx is not None:
+            for _v in reversed(list(ctx.stack)):
+                if not isinstance(_v, dict) or _v.get('__listview'):
+                    break
+                _p = _v.get('__pad') or 0
+                if _p:
+                    pos['left'] = pos.get('left', 0) + _p
+                    pos['top'] = pos.get('top', 0) + _p
         return {
             'height': pos.get('height', 40), 'left': pos.get('left', 0),
             'top': pos.get('top', 0), 'width': pos.get('width', 100),

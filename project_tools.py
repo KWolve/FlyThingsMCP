@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """FlyThings project tools: ftu read, project spec, validation, fui/fun integration."""
-import json, os, re, shutil, subprocess, tempfile
+import json, os, re, shutil, subprocess, tempfile, time
+
+import platforms as _platforms  # 平台矩阵唯一来源（新增/调整平台只改 platforms.py）
 
 # ---------- 工具链路径（可配置 + 自动探测）----------
 # 优先级：环境变量 FLYTHINGS_FUN_DIR（用户显式指定，最高）> 包内 toolchain（随包分发）> 标准安装目录
@@ -33,7 +35,11 @@ FUI_EXE = _tool_path('fui.exe')
 FUN_EXE = _tool_path('fun.exe')
 
 # IDE 空白模板（新建项目骨架来源，保证框架约定天然正确）
-# 优先用包内 templates/（分发包内置，客户无需装 IDE）；其次 IDE 安装目录
+# 优先用包内 templates/（分发包内置，客户无需装 IDE）；其次 IDE 安装目录。
+# ⚠️ 下面只是「默认探测起点」，不是平台白名单：`_template_dir` 会先在包内 templates/
+# 里找，再按目录扫描 IDE workspace（大小写/命名差异也能认出来），最后才用这张表。
+# 可用环境变量 FLYTHINGS_IDE_WORKSPACE 指向非默认安装目录。
+IDE_WORKSPACE = os.environ.get('FLYTHINGS_IDE_WORKSPACE', r'C:\zkswe\FlyThingsPreview\bin\workspace')
 IDE_TEMPLATES = {
     'F133': r'C:\zkswe\FlyThingsPreview\bin\workspace\HelloWord_F133',
     'F135': r'C:\zkswe\FlyThingsPreview\bin\workspace\HelloWord_F135',
@@ -44,16 +50,43 @@ IDE_TEMPLATES = {
 }
 
 
+def _scan_ide_templates():
+    """按真实目录扫 IDE workspace，返回 {规范平台名: 目录}。
+
+    为什么扫而不是只靠 IDE_TEMPLATES：那张表写死了本机路径与大小写
+    （Helloword_V85x vs HelloWord_V85X），换机器/改目录名就“没模板”，
+    而真实能力应该看目录里到底有什么。
+    """
+    found = {}
+    try:
+        if not os.path.isdir(IDE_WORKSPACE):
+            return found
+        for name in sorted(os.listdir(IDE_WORKSPACE)):
+            d = os.path.join(IDE_WORKSPACE, name)
+            if not os.path.isdir(d):
+                continue
+            for plat in _platforms.supported():
+                key = name.lower().replace('_', '').replace('-', '')
+                # 只认 HelloWord*<平台> 形态，避免误抓同目录下别人的工程
+                if key.startswith('helloword') and key.endswith(plat.lower()):
+                    found.setdefault(plat, d)
+    except OSError:
+        return found
+    return found
+
+
 def _template_dir(plat):
-    """模板目录：包内 templates/HelloWord_<plat> 优先，其次 IDE 安装目录。"""
+    """模板目录：包内 templates/HelloWord_<plat> 优先 → IDE workspace 实扫 → 硬编码表兜底。"""
     pkg = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates', 'HelloWord_' + plat)
     if os.path.isdir(pkg):
         return pkg
-    return IDE_TEMPLATES.get(plat, '')
-PLATFORM_ALIASES = {
-    'F133EMMC': 'F133', 'F136': 'F135', 'V85X': 'V85X', 'V85XEMMC': 'V85X',
-    'T113': 'T113', 'T113EMMC': 'T113', 'T113STDCXX': 'T113', 'Z20': 'Z20',
-}
+    hit = _scan_ide_templates().get(plat)
+    if hit:
+        return hit
+    legacy = IDE_TEMPLATES.get(plat, '')
+    return legacy if legacy and os.path.isdir(legacy) else legacy
+# 平台别名表改由 platforms.py 提供（v0.27.32 起单一来源）；保留同名常量供旧调用方兼容
+PLATFORM_ALIASES = {a: n for n, m in _platforms.PLATFORMS.items() for a in m.get('alias', ())}
 
 
 # ---------------- fui 基础 ----------------
@@ -88,26 +121,50 @@ def _run_fui(cmd, target_dir):
 
 
 # ---------------- fun.exe 基础（build/launch）----------------
-def _run_fun(cmd, project_dir, device=''):
+def _run_fun(cmd, project_dir, device='', retries=1, timeout=600, extra=None):
     """执行 fun.exe 命令（build/launch 等），在项目根目录运行。
     fun.exe 与 fui.exe 同目录（D:/zkswe/fun/ 或自动探测）。
-    ⚠️ fun launch 不支持 -s 参数（带参数有其他问题），device 参数保留仅供 build_ui_flow 兼容，不追加到命令。"""
+    launch 走网络推送（adb over wifi），网络抖动/推送中断会失败——retries>1 时
+    自动重试（间隔 2s），覆盖「网络超时静默/误推旧固件」场景；信任 fun 差分能力，
+    不自写 push 脚本校验产物。build 类本地命令 retries 保持 1（无需重试）。
+    ⚠️ fun launch 不支持 -s 参数（带参数有其他问题），device 参数保留仅供 build_ui_flow 兼容，不追加到命令。
+    extra: 追加到命令后的参数列表（如 fun pack -o <path>），默认 None。"""
     if not os.path.isdir(project_dir):
-        return {"success": False, "error": f"项目目录不存在: {project_dir}"}
+        return {"success": False, "error": "项目目录不存在: %s" % project_dir}
     if not os.path.isfile(FUN_EXE):
-        return {"success": False, "error": f"fun.exe 未找到（工具目录: {_tool_dir()}）。"
-                f"请设置环境变量 FLYTHINGS_FUN_DIR 指向含 fun.exe/fui.exe 的目录，"
-                f"或将其安装到 D:\\zkswe\\fun\\。"}
-    args = [FUN_EXE, cmd]
-    try:
-        r = subprocess.run(args, cwd=project_dir,
-                           capture_output=True, text=True, timeout=600,
-                           stdin=subprocess.DEVNULL,  # ⚠️ 防 fun.exe 继承 MCP stdio 管道挂起
-                           encoding='utf-8', errors='replace')
-        return {"success": r.returncode == 0, "returncode": r.returncode,
-                "stdout": (r.stdout or '')[-800:], "stderr": (r.stderr or '')[-800:]}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+        return {"success": False, "error": "fun.exe 未找到（工具目录: %s）。"
+                "请设置环境变量 FLYTHINGS_FUN_DIR 指向含 fun.exe/fui.exe 的目录，"
+                "或将其安装到 D:\\zkswe\\fun\\。" % _tool_dir()}
+    args = [FUN_EXE, cmd] + list(extra or [])
+    # ⚠️ 沛哥 2026-09-14 定：暂时发布的 MCP 不支持 `fun sim`（模拟器运行）——
+    # 工具面不暴露该能力，这里再显式拦住，避免 AI 自行调用/文档误报“支持”。
+    if cmd == 'sim':
+        return {"success": False,
+                "error": "MCP 暂不支持 fun sim（模拟器运行）",
+                "hint": "要推真机调试用 flythings_build_ui_flow（fun launch）；"
+                        "要出图验证用 flythings_device_screenshot；"
+                        "模拟器请在本地命令行手动跑 fun sim。"}
+    last = None
+    for attempt in range(1, max(1, retries) + 1):
+        try:
+            r = subprocess.run(args, cwd=project_dir,
+                               capture_output=True, text=True, timeout=timeout,
+                               stdin=subprocess.DEVNULL,
+                               encoding='utf-8', errors='replace')
+            if r.returncode == 0:
+                return {"success": True, "returncode": 0, "retried": attempt - 1,
+                        "stdout": (r.stdout or '')[-800:], "stderr": (r.stderr or '')[-800:]}
+            last = {"success": False, "returncode": r.returncode, "retried": attempt - 1,
+                    "stdout": (r.stdout or '')[-800:], "stderr": (r.stderr or '')[-800:]}
+        except subprocess.TimeoutExpired:
+            last = {"success": False, "error": "fun %s 执行超时（>%ss）" % (cmd, timeout), "retried": attempt - 1}
+        except Exception as e:
+            last = {"success": False, "error": str(e), "retried": attempt - 1}
+        if attempt < retries:
+            time.sleep(2)  # 网络抖动自愈间隔
+    last['error'] = last.get('error') or (last.get('stderr') or last.get('stdout') or '')[-300:]
+    last['message'] = "fun %s 失败，已自动重试 %d 次" % (cmd, max(1, retries))
+    return last
 
 
 def _rewrite_ftu_resolution(project_root, resolution):
@@ -295,8 +352,8 @@ def flythings_read_json(json_path):
 _PROJECT_SPEC = {
     "directoryRules": {
         "activity": "IDE生成目录（mainActivity.cpp/h 由 IDE 编译时根据 ftu 自动生成），禁止创建/修改/覆盖；业务代码只写 src/logic/*.cc",
-        "logic": "UI与业务的关联层（回调里取控件指针/刷界面/调业务对象），不做复杂逻辑；复杂功能拆独立 C++ 类放自建目录（core/modules/business 等）并在 logic include+调用",
-        "core": "独立模块目录"
+        "logic": "UI与业务的关联层（回调里取控件指针/刷界面/调业务对象），不做复杂逻辑；复杂功能拆独立 C++ 类放业务域目录并在 logic include+调用",
+        "domain": "业务域目录：直接建在 src/ 下、按业务域命名（src/network/、src/media/、src/storage/ 等），不要在 src/ 下再分 core/modules 中间层"
     },
     "generationRules": {
         "idMacros": {"file": "mainActivity.h", "section": "/*TAG:Macro宏ID*/", "autoGenerated": True},
@@ -315,11 +372,13 @@ _PROJECT_SPEC = {
         "新建项目应从 IDE 模板创建（flythings_create_project），勿手搭骨架",
         "工程文件 .project/.cproject/.settings 是 IDE 必需，缺失则项目无法编译",
         "Manifest 用新格式 <manifest platform=\"...\">（旧 <Manifest> 格式 IDE 不认）",
-        "代码层架构：logic/*.cc 只做 UI 与业务的关联操作（取控件指针/setText/调业务对象）；复杂功能开发成独立 C++ 类放自建目录（src/core/、src/modules/ 等），在 logic include+调用；新增业务代码一律用 .cpp/.h（独立编译单元，fun build 自动编译），禁止新建 .cc 文件——.cc 是 IDE 按页面生成的 logic 专属（仅 mainLogic.cc 等），靠 mainActivity.cpp #include 进编译单元，手写 .cc 不会被编译（Makefile 只编 %.cpp %.c）",
+        "代码层架构：logic/*.cc 只做 UI 与业务的关联操作（取控件指针/setText/调业务对象）；复杂功能开发成独立 C++ 类放**业务域目录**，在 logic include+调用；新增业务代码一律用 .cpp/.h（独立编译单元，fun build 自动编译），禁止新建 .cc 文件——.cc 是 IDE 按页面生成的 logic 专属（仅 mainLogic.cc 等），靠 mainActivity.cpp #include 进编译单元，手写 .cc 不会被编译（Makefile 只编 %.cpp %.c）",
+        "src 目录命名（2026-09-13 沛哥定规）：按业务域直接建在 src/ 下，不设 core/modules 中间分层——如 src/network/NetworkManager.cpp+.h、src/media/MediaPlayer.cpp+.h、src/storage/ConfigStore.cpp+.h；域名为小写英文单数名词，文件=域内一个职责类（大驼峰，与文件名一致）；include 用相对 src/ 路径（#include \"network/NetworkManager.h\"）",
+        "页面架构（2026-09-13 定规）：ftu=Activity=独立编译单元（独立生命周期/返回栈），window=同 Activity 内显隐（零切换成本/共享指针）——跨业务域、需独立生命周期或返回栈、大页面 → 独立 ftu（openActivity）；同一业务域内的页签/二级页/弹窗/整屏遮挡 → 同 ftu 内多个整屏 window + showWnd/hideWnd；并列内容区翻页 → pagewindow/slidewindow/scrollwindow 容器。详见知识库 devflow/page-architecture-spec.md",
         "src/uart 为系统模板：UartContext/ProtocolSender 勿改，只改 ProtocolData.h 与 ProtocolParser.cpp 协议部分",
         "json 布局用 fui pack 生成 ftu（ui/ 下已附带 fui.exe）；编译推送用 fun.exe build / fun.exe launch（项目根目录已附带 fun.exe）",
         "⚠️ 交付流程：项目生成后直接用 fun.exe build 编译、fun.exe launch 推送设备，无需客户手动导入 FlyThings IDE 编译烧录",
-        "需要三方能力（MQTT/HTTP/JSON/数据库/蓝牙/SSL/OTA/图片等）→ 先 flythings_search_package / flythings_recommend_manifest 检索现有 package，有包用包，禁止手写库或凭空 include",
+        "需要三方能力（MQTT/HTTP/JSON/数据库/蓝牙/SSL/OTA/图片等）→ 先 flythings_package_search / flythings_manifest 检索现有 package，有包用包，禁止手写库或凭空 include",
         "代码 include 了三方库头文件 → Manifest.xml 必须声明对应 package（validate_project 会检查缺失依赖）"
         "GPIO 外设控制：代码能力非 UI 控件——#include \"utils/GpioHelper.h\"（zkhardware 包）；GpioHelper::input(pin) 读（1高/0低/-1失败）/ output(pin,val) 写（1高/0低）/ registerGpioListener 边沿监听；引脚名按平台不同（Z11:B_02/E_20、SV50PB:PIN7、SV50PC:PIN2、H500S:PG0、SV50PD:A0，头文件有宏）；模组需启用 gpio 功能并升级固件",
     ]
@@ -398,8 +457,10 @@ def flythings_validate_project(root):
 
     ⚠️ 空白项目判定：工作目录 ui/ 下没有 .ftu 即视为空白项目（无需再去读 json），
     返回 isEmptyProject=true，此时不再做任何检查，直接向用户询问硬件平台
-    （F133/F135/Z21）与屏幕分辨率（如 800x480），然后调用 flythings_create_project
-    创建项目；禁止到其他目录检索 json/ftu 文件。
+    与屏幕分辨率（如 800x480），然后调用 flythings_create_project 创建项目；
+    禁止到其他目录检索 json/ftu 文件。
+    （待询问的平台清单不在这里写死：用 platforms.py 的 supported()，
+    不要在提示文案里手写枚举——那就成了第二份平台真相。）
     若 projectInfo.platform 或 projectInfo.resolution 为 null（非空白项目但缺 Manifest/ui 布局），
     同样必须停下来向用户询问这两个选项，禁止自行猜测或用默认值继续。
     """
@@ -411,9 +472,11 @@ def flythings_validate_project(root):
                 "projectInfo": project_info,
                 "needUserInput": {'platform': not project_info['platform'],
                                    'resolution': not project_info['resolution']},
+                "supportedPlatforms": _platforms.supported(),
                 "hint": '空白项目（ui 目录无 .ftu 布局，无需再读取 json）：'
-                        '直接向用户询问硬件平台（F133/F135/Z21）与屏幕分辨率（如 800x480），'
-                        '然后调用 flythings_create_project 创建；禁止去其他目录检索 json/ftu。',
+                        '直接向用户询问硬件平台（%s）与屏幕分辨率（如 800x480），'
+                        '然后调用 flythings_create_project 创建；'
+                        '禁止去其他目录检索 json/ftu。' % '/'.join(_platforms.supported()),
                 "errors": [], "warnings": []}
     errors, warnings = [], []
     src = os.path.join(root, 'src')
@@ -423,7 +486,8 @@ def flythings_validate_project(root):
     if need_user['platform'] or need_user['resolution']:
         warnings.append({'file': 'project', 'type': 'unknown_platform_resolution',
                          'msg': '无法确认硬件平台与屏幕分辨率（缺 Manifest 平台属性或 ui 布局/设置），'
-                                '需要向用户询问平台（F133/F135/Z21）与分辨率（如 800x480）'})
+                                '需要向用户询问平台（%s）与分辨率（如 800x480）'
+                                % '/'.join(_platforms.supported())})
 
     # 1. logic 层
     logic_dir = os.path.join(src, 'logic')
@@ -680,7 +744,8 @@ def _is_elf(path):
         return False
 
 
-def flythings_create_bin_project(project_root, project_name='', platform='z21',
+def flythings_create_bin_project(project_root, project_name='',
+                                 platform=_platforms.DEFAULT_BIN_PLATFORM,
                                  app_version='1.0.0', description='', with_build=True):
     """创建「可执行程序」类型项目（fun create --type bin）并编译为直接可运行的 ELF 二进制。
 
@@ -690,9 +755,15 @@ def flythings_create_bin_project(project_root, project_name='', platform='z21',
     - 部署：adb push + chmod +x 直接跑（无 zkgui 宿主，不能启动 UI 应用）
     - 非交互：自动传 --app-version/--description 跳过向导；目录非空直接报错（防覆盖询问卡死）
 
-    传入项目根目录（可不存在，自动创建）、平台（默认 z21，支持 z20/t113/f133 等）、
-    项目名（缺省取目录名）。返回创建结果 + 编译日志 + 产物路径与 ELF 验证。
+    传入项目根目录（可不存在，自动创建）、平台（默认同 `platforms.DEFAULT_BIN_PLATFORM`；
+    大小写不敏感，别名可归一，未知平台会报错并列出支持项）、项目名（缺省取目录名）。
+    返回创建结果 + 编译日志 + 产物路径与 ELF 验证。
     """
+    try:
+        # 出口统一小写（fun.exe / 产物目录 .fun/<小写平台>/ 的既有约定）
+        platform = _platforms.bin_tool_dir(platform or _platforms.DEFAULT_BIN_PLATFORM)
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
     root = os.path.abspath(project_root)
     name = (project_name or os.path.basename(root)).strip()
     if not re.match(r'^[A-Za-z][A-Za-z0-9_]*$', name):
@@ -863,14 +934,21 @@ def _edit_json(json_path, operations):
     except Exception as e:
         return {"success": False, "error": f"json 解析失败: {e}"}
     ok, report = _apply_edits(data, ops)
+    bak = json_path + '.bak'
+    try:
+        shutil.copy2(json_path, bak)  # v0.27.31：写回前先备份 json，失败则不写入
+    except Exception as e:
+        return {"success": False, "error": f"json 备份失败（未写入任何修改）: {e}"}
     with open(json_path, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
-    return {"success": ok, "jsonPath": json_path, "report": report,
+    return {"success": ok, "jsonPath": json_path, "jsonBackup": bak, "report": report,
             "controlsCount": sum(1 for k, v in data.items() if isinstance(v, dict) and '__' in k)}
 
 
-def flythings_edit_ftu(ftu_path, operations, output_ftu=''):
-    """编辑 ftu 布局：自动应用编辑到 json 后 pack 回 ftu（默认覆盖原文件，或 output_ftu 指定新文件）。
+def flythings_edit_ftu(ftu_path, operations, output_ftu='', overwrite=False):
+    """编辑 ftu 布局：自动应用编辑到 json 后 pack 回 ftu。
+    ⚠️ 默认不覆盖原 ftu（overwrite=False）：pack 产物落到 <name>.edited.ftu，原 ftu 原样还原；
+    确认效果后再传 overwrite=True 覆盖原 ftu（或 output_ftu 指定目标）。原 ftu 与 json 都留 .bak。
     operations 为 JSON 数组字符串，支持 set/remove/add/set_root（见 _apply_edits）。
     ⚠️ 布局以 json 为源：优先直接编辑同目录已有 json 再 pack 回 ftu；无 json 时报错。
     客户说「把这个按钮往右移/改文本/换颜色/删掉某控件/复制一个控件」时调用。"""
@@ -882,6 +960,12 @@ def flythings_edit_ftu(ftu_path, operations, output_ftu=''):
     if not os.path.isfile(json_path):
         return {"success": False,
                 "error": f"缺少同目录 {base}.json（布局以 json 为源，请先提供 json 布局再编辑）"}
+    orig_ftu = os.path.abspath(ftu_path)
+    ftu_bak = orig_ftu + '.bak'
+    try:
+        shutil.copy2(orig_ftu, ftu_bak)  # 无论是否覆盖都先备份原 ftu（可回滚）
+    except Exception as e:
+        return {"success": False, "error": f"原 ftu 备份失败（未做任何修改）: {e}"}
     ed = _edit_json(json_path, operations)
     if not ed['success']:
         return ed
@@ -889,16 +973,29 @@ def flythings_edit_ftu(ftu_path, operations, output_ftu=''):
     if not r['success']:
         return {"success": False, "error": f"fui pack 失败: {r.get('stderr') or r.get('stdout')}",
                 "report": ed['report']}
-    new_ftu = os.path.join(src_dir, base + '.ftu')
-    dst = os.path.abspath(output_ftu) if output_ftu else os.path.abspath(ftu_path)
-    if os.path.abspath(new_ftu) != dst:
-        shutil.copy2(new_ftu, dst)
-    return {"success": True, "ftuPath": dst, "report": ed['report'],
-            "controlsCount": ed.get('controlsCount'), "syncedJson": True}
+    packed = os.path.join(src_dir, base + '.ftu')
+    if output_ftu:
+        target = os.path.abspath(output_ftu)
+    elif overwrite:
+        target = orig_ftu
+    else:
+        target = os.path.join(src_dir, base + '.edited.ftu')
+    if os.path.abspath(packed) != target:
+        shutil.copy2(packed, target)
+    overwrote = bool(overwrite) and target == orig_ftu
+    if not overwrote:
+        # pack 已把原 ftu 覆盖，这里还原，保证「默认不覆盖」真的成立
+        shutil.copy2(ftu_bak, orig_ftu)
+    return {"success": True, "ftuPath": target, "overwriteOriginal": overwrote,
+            "backup": ftu_bak, "jsonPath": json_path, "jsonBackup": ed.get('jsonBackup'),
+            "report": ed['report'], "controlsCount": ed.get('controlsCount'), "syncedJson": True,
+            "hint": (f"已覆盖原 ftu（备份 {os.path.basename(ftu_bak)}，回滚=拷回该文件）" if overwrote
+                     else f"默认不覆盖原 ftu：修改结果在 {os.path.basename(target)}；"
+                          f"确认无误后传 overwrite=True 覆盖原文件")}
 
 
 # ---------------- 工具 6: UI 构建流程（pack → build → launch）----------------
-def flythings_build_ui_flow(project_root, with_launch=True, device=''):
+def flythings_build_ui_flow(project_root, with_launch=False, device=''):
     """FlyThings UI 构建流程（关键步骤，不可跳过）：
     ① 检查 ui/*.json 与 *.ftu 修改时间一致性
        - json 比 ftu 新 = 改过 json 没重新打包
@@ -906,10 +1003,10 @@ def flythings_build_ui_flow(project_root, with_launch=True, device=''):
     ② 有改动才 fui pack <ui目录>（设备实际加载的是 FTU 而非 JSON）
     ③ fun install 同步 Manifest 依赖（每次 build 前执行，Manifest 变更自动拉取新依赖）
     ④ fun build 编译 C++ 代码
-    ⑤ fun build 通过后直接 fun launch 推送设备并启动（默认，with_launch=False 可跳过）
+    ⑤ **默认到此为止（不推真机）**；只有用户明确说「推到设备 / 跑一下看效果」时才传 with_launch=True
     ⚠️ launch 失败（无 adb 设备）时返回 needDeviceInput=true，此时必须询问用户接入方式：
        1) USB 接入：将设备通过 USB 连电脑，然后重试本工具；
-       2) 网络接入：让用户提供设备 IP（如 192.168.1.100），用 device='<ip>' 重试（走 fun launch -s <ip>）。
+       2) 网络接入：让用户提供设备 IP（如 <设备IP>），用 device='<ip>' 重试（走 fun launch -s <ip>）。
        禁止替用户猜测 IP。
     ⚠️ 常见错误：修改 JSON 后直接 launch 忘记 pack，设备上仍运行旧版 FTU 布局；
     开发者改过 ftu 时若直接改 json 会覆盖其修改（必须先 unpack ftu 同步）。
@@ -969,21 +1066,21 @@ def flythings_build_ui_flow(project_root, with_launch=True, device=''):
 
     # ⑤ fun launch（build 通过后直接推送启动；失败→询问设备接入方式）
     if with_launch:
-        rl = _run_fun('launch', project_root, device=device)
+        rl = _run_fun('launch', project_root, device=device, retries=5)
         steps.append({"step": "fun launch", "success": rl['success'],
                       "device": device or '(自动发现 USB 设备)',
                       "detail": (rl.get('stderr') or rl.get('stdout') or rl.get('error') or '')[-400:]})
         if not rl['success']:
             return {"success": False, "steps": steps,
                     "needDeviceInput": True,
-                    "message": "fun launch 失败：未检测到可用的 adb 设备（或设备未连接）。"
+                    "message": "fun launch 失败（已自动重试 5 次仍失败）：未检测到可用的 adb 设备（或设备未连接/网络推送中断）。"
                                 "请询问用户接入方式："
                                 "1) USB 接入：将设备通过 USB 连接到电脑后重试本工具；"
                                 "2) 网络接入：请用户提供设备 IP（如 192.168.1.100），"
                                 "用 device='<ip>' 重新调用（将执行 fun launch -s <ip>）。",
                     "error": rl.get('error') or (rl.get('stderr') or rl.get('stdout') or '')[-300:]}
     else:
-        steps.append({"step": "fun launch", "success": True, "skipped": "未请求推送（with_launch=False）"})
+        steps.append({"step": "fun launch", "success": True, "skipped": "未请求推送（with_launch=False，默认不推真机）"})
 
     # 最终时间戳校验（打包后 json 不应比 ftu 新）
     ts_after = _ui_timestamp_check(project_root)
@@ -994,21 +1091,190 @@ def flythings_build_ui_flow(project_root, with_launch=True, device=''):
             "finalCheck": {"stale": ts_after['stale'], "missing": ts_after['missing']}}
 
 
+# ---------------- 工具: 制作升级包（固化升级 update.img）----------------
+# ⚠️ 场景别名（固化升级类意图一律本工具，禁止自造命令）：
+#   用户口语：「打包升级包 / 出升级包 / 生成 update.img / 固化 / 固化升级 / 刷进设备 /
+#   出货版本 / 量产版本 / 发布版本 / 烧到机器里 / TF卡升级包 / OTA 包 / 整机升级」。
+#   与「调试/跑一下/推送到设备」（build_ui_flow + with_launch）语义**不同**：
+#   调试 = fun launch 临时推送（掉电即失）；固化 = fun pack 出 update.img（掉电保留）。
+#
+# 产物与落地（详见 knowledge/devflow/upgrade-pack-image.md）：
+#   ① TF 卡：FAT32 卡根目录放 update.img → 插卡上电 → 升级界面勾选升级
+#   ② ADB：adb push update.img /tmp → setprop sys.zkupgrade.flag 255 →
+#      setprop sys.zkupgrade.dir /tmp → setprop ctl.restart zkswe
+#   ③ 远程/批量：HTTP 下发 update.img 或局域网批量升级工具
+PACK_ERR_HINTS = (
+    ('sign error', '',
+     '打包/签名步骤的 fsimg.exe 是 32 位程序，系统缺 32 位 VC++ 运行时（msvcp140.dll / '
+     'vcruntime140.dll；报错码 0xc0000135=找不到 DLL、0xc000007b=位数不匹配都属此类）。'
+     'Windows 装「Visual C++ 2015-2022 Redistributable (x86)」后重试；'
+     '或把 32 位 msvcp140.dll + vcruntime140.dll 放到 fsimg.exe 同级目录。'),
+    ('not found in local', '',
+     '依赖包未安装：先执行 fun install（本工具已默认先跑 install）后再 pack。'),
+)
+
+
+def _pack_hint(text):
+    """把 pack 失败输出映射成可执行提示。"""
+    low = (text or '').lower()
+    for k1, k2, hint in PACK_ERR_HINTS:
+        if k1 in low and (not k2 or k2.lower() in low):
+            return hint
+    return ''
+
+
+def _find_update_img(project_root, out_path, platform):
+    """定位 pack 产物 update.img：显式 -o 优先，其次 fun 默认输出位置。"""
+    cands = []
+    if out_path:
+        p = out_path if os.path.isabs(out_path) else os.path.join(project_root, out_path)
+        cands.append(p)
+    else:
+        cands.append(os.path.join(project_root, 'out', 'update.img'))
+        if platform:
+            cands.append(os.path.join(project_root, '.fun', platform, 'update.img'))
+        fun_dir = os.path.join(project_root, '.fun')
+        if os.path.isdir(fun_dir):
+            for d in sorted(os.listdir(fun_dir)):
+                cands.append(os.path.join(fun_dir, d, 'update.img'))
+    for p in cands:
+        if os.path.isfile(p):
+            return p
+    return ''
+
+
+def flythings_pack_upgrade(project_root, out_path='', release_version='', ab=False,
+                           with_build=False, dry_run=False):
+    """制作升级包 update.img（固化升级用，区别于调试推送）。
+    ⚠️ 场景别名（固化升级类意图一律本工具，禁止自造脚本/命令）：
+      用户口语：「打包升级包/出升级包/生成 update.img/固化/固化升级/刷进设备/出货版本/
+      量产版本/发布版本/烧到机器里/TF卡升级包/OTA 包/整机升级」。
+    ⚠️ 与「调试/跑一下/推送到设备」语义不同：那是 build_ui_flow（fun launch 临时推送，
+      掉电即失，不固化）；要固化到设备、掉电保留，必须本工具出 update.img。
+    流程：① fun install 同步依赖 → ②（可选 with_build=True）fun build →
+      ③ fun pack（-o 指定输出，--release-version 指定版本号，--ab 出 AB 系统 OTA 包）。
+    产物：默认 .fun/<平台>/update.img（-o 可改）；返回路径/大小/时间与三种刷法说明。
+    dry_run=True 只回命令计划不执行（写操作默认安全）。
+    ⚠️ Windows 常见坑：`FATAL sign error: exit status 0xc0000135 / 0xc000007b` = 缺 32 位
+      VC++ 运行时（fsimg.exe 是 32 位）；`package xxx not found in local` = 先 fun install。
+    """
+    if not os.path.isdir(project_root):
+        return {"success": False, "error": "项目目录不存在: %s" % project_root}
+    if not os.path.isdir(os.path.join(project_root, 'ui')) and \
+            not os.path.isfile(os.path.join(project_root, 'Manifest.xml')):
+        return {"success": False,
+                "error": "不是 fun 工程根目录（缺 ui/ 且缺 Manifest.xml）: %s" % project_root}
+
+    info = _detect_project_info(project_root)
+    platform = info.get('platform') or ''
+    extra = []
+    if platform:
+        extra += ['-p', platform]
+    if release_version:
+        extra += ['--release-version', str(release_version)]
+    if ab:
+        extra.append('--ab')
+    if out_path:
+        extra += ['-o', out_path]
+    cmdline = 'fun pack' + ('' if not extra else ' ' + ' '.join(extra))
+
+    if dry_run:
+        return {"success": True, "dryRun": True, "projectRoot": project_root,
+                "platform": platform, "command": cmdline,
+                "plan": ["fun install",
+                         ("fun build" if with_build else "fun build（跳过，with_build=False）"),
+                         cmdline],
+                "output": out_path or ('.fun/%s/update.img' % (platform or '<platform>')),
+                "note": "dry_run 只回计划不执行；确认后传 dry_run=False 出包"}
+
+    steps = []
+    ri = _run_fun('install', project_root, timeout=900)
+    steps.append({"step": "fun install", "success": ri['success'],
+                  "detail": (ri.get('stderr') or ri.get('stdout') or ri.get('error') or '')[-400:]})
+
+    if with_build:
+        rb = _run_fun('build', project_root, timeout=1800)
+        steps.append({"step": "fun build", "success": rb['success'],
+                      "detail": (rb.get('stderr') or rb.get('stdout') or rb.get('error') or '')[-500:]})
+        if not rb['success']:
+            return {"success": False, "steps": steps, "error": rb.get('error') or "fun build 失败"}
+
+    rp = _run_fun('pack', project_root, timeout=1800, extra=extra)
+    out_text = (rp.get('stderr') or '') + (rp.get('stdout') or '')
+    steps.append({"step": "fun pack", "success": rp['success'], "command": cmdline,
+                  "detail": out_text[-500:]})
+
+    img = _find_update_img(project_root, out_path, platform)
+    if not rp['success'] and not img:
+        hint = _pack_hint(out_text) or _pack_hint(rp.get('error') or '')
+        res = {"success": False, "steps": steps, "platform": platform,
+               "command": cmdline, "error": rp.get('error') or out_text[-300:]}
+        if hint:
+            res['hint'] = hint
+        return res
+
+    size = os.path.getsize(img) if img else 0
+    return {
+        "success": bool(img),
+        "projectRoot": project_root,
+        "platform": platform,
+        "command": cmdline,
+        "steps": steps,
+        "updateImg": img,
+        "sizeBytes": size,
+        "sizeMB": round(size / 1048576.0, 2),
+        "modified": (time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(os.path.getmtime(img)))
+                     if img else ''),
+        "howToFlash": [
+            "TF卡（最常用）：卡格式化 FAT32，根目录放 update.img → 插卡重新上电 → "
+            "升级界面勾选项目点升级；升级完及时拔卡防重复升级",
+            "ADB 固化：adb push update.img /tmp/update.img && adb shell setprop "
+            "sys.zkupgrade.flag 255 && adb shell setprop sys.zkupgrade.dir /tmp && "
+            "adb shell setprop ctl.restart zkswe",
+            "插卡自动升级：卡根目录再放无后缀文件 zkautoupgrade（内容=延时秒数）自动升级；"
+            "zkrebootdelay 控制升级完延时重启",
+            "远程/批量：设备端 HTTP 下载 update.img 走 OTA；局域网批量升级工具（Z20/Z21/Z261）",
+        ],
+        "note": "update.img 是固化升级包（掉电保留）；调试推送请用 build_ui_flow（fun launch）",
+    }
+
 # ---------------- 工具 7: 从 IDE 模板创建项目骨架 -------------
+def _project_names_in_files(root):
+    """取出模板里**真实**的旧工程名（不是目录名）。
+
+    旧工程名只出现在这些位置：.project 的 <name>、.cproject 的
+    name="/XXX(/Release|/Debug)" 工作区路径、<project id="XXX.flythings..."> 前缀。
+    """
+    names = set()
+    pj = os.path.join(root, '.project')
+    if os.path.isfile(pj):
+        txt = open(pj, encoding='utf-8', errors='replace').read()
+        names |= {m.strip() for m in re.findall(r'<name>\s*([^<]+?)\s*</name>', txt)}
+    cj = os.path.join(root, '.cproject')
+    if os.path.isfile(cj):
+        txt = open(cj, encoding='utf-8', errors='replace').read()
+        names |= set(re.findall(r'name="/([^/"]+)', txt))
+        names |= set(re.findall(r'<project id="([^."]+)\.', txt))
+    return {n for n in names if n.strip()}
+
+
 def flythings_create_project(project_root, platform=None, resolution=None,
                              app_name='', with_cli=True, force=False):
     """从 HelloWord 基础 Demo 项目复制骨架创建完整 FlyThings 项目。
     - 模板源：包内 templates/HelloWord_<平台>（或 IDE 安装目录）
     - 自动替换：工程名 / 分辨率（.settings prefs + ftu 内嵌）/ 平台（Manifest.xml）
     - 附带 fui.exe + fun.exe（with_cli=True），交付用 fun.exe build + launch，无需客户导入 IDE
-    传入目标项目根目录完整路径、平台（F133/F135/Z21）与分辨率（如 800x480）。
+    传入目标项目根目录完整路径、平台（用 platforms.py 的 supported() 取，别手写枚举）
+    与分辨率（如 800x480）。
 
     ⚠️⚠️ 硬性要求：platform 与 resolution 必须由用户明确提供，禁止猜测或使用默认值。
-    若用户未指定硬件平台（F133/F135/Z21）或屏幕分辨率（如 800x480），
+    若用户未指定硬件平台或屏幕分辨率（如 800x480），
     本工具会直接返回错误，拒绝创建——必须先向用户询问这两个参数再调用。
     """
     if not platform or not str(platform).strip():
-        return {"success": False, "error": "缺少硬件平台：请先向用户询问平台（F133/F135/Z21），禁止猜测"}
+        return {"success": False,
+                "error": "缺少硬件平台：请先向用户询问平台（%s），禁止猜测"
+                         % '/'.join(_platforms.supported())}
     if not resolution or not str(resolution).strip():
         return {"success": False, "error": "缺少屏幕分辨率：请先向用户询问分辨率（如 800x480、480x272），禁止猜测"}
     if not re.fullmatch(r'\d+\s*[xX]\s*\d+', str(resolution).strip()):
@@ -1016,11 +1282,15 @@ def flythings_create_project(project_root, platform=None, resolution=None,
     root = os.path.abspath(project_root)
     if os.path.isdir(root) and any(os.listdir(root)) and not force:
         return {"success": False, "error": f"目标目录非空: {root}（如需覆盖请传 force=True）"}
-    plat = platform.upper()
-    tpl_plat = PLATFORM_ALIASES.get(plat, plat)
-    tpl = _template_dir(tpl_plat)
+    try:
+        plat = _platforms.validate(platform)   # 大小写/别名归一；未知平台报错并列出支持项
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+    tpl = _template_dir(plat)
     if not tpl or not os.path.isdir(tpl):
-        return {"success": False, "error": f"无 {platform} 的 IDE 空白模板（可用: {', '.join(IDE_TEMPLATES)}，或包内 templates/）"}
+        return {"success": False,
+                "error": f"无 {platform} 的 IDE 空白模板（支持平台: {', '.join(_platforms.supported())}，"
+                         f"或包内 templates/）"}
     os.makedirs(root, exist_ok=True)
     # 1. 复制模板全部文件（跳过 Release 编译产物）
     for name in os.listdir(tpl):
@@ -1033,14 +1303,26 @@ def flythings_create_project(project_root, platform=None, resolution=None,
         else:
             shutil.copy2(s, d)
     # 2. 替换工程名（.project / .cproject）
+    #    ⚠️ 只替换模板「目录名」是不够的：模板内容里的真实工程名常与目录名不一致
+    #    （HelloWord_V85X 目录里 .project 写 Helloword_V85x、.cproject 残留 template_z20_smarthome；
+    #      HelloWord_T113 目录里写 HelloWord_T113Nor）——只按目录名替换会漏改或半改
+    #    （T113 会剩下 "Nor" 尾巴），新工程名仍挂着模板残留。
+    #    改为：从模板文件内容读出真实旧名（含目录名兜底），长的先替换。
     tpl_name = os.path.basename(tpl)
     new_name = app_name.strip() or os.path.basename(root)
+    old_names = ({tpl_name} | _project_names_in_files(root)) - {new_name}
     for fn in ('.project', '.cproject'):
         p = os.path.join(root, fn)
-        if os.path.isfile(p):
-            txt = open(p, encoding='utf-8', errors='replace').read()
-            txt = txt.replace(tpl_name, new_name)
-            open(p, 'w', encoding='utf-8').write(txt)
+        if not os.path.isfile(p):
+            continue
+        txt = open(p, encoding='utf-8', errors='replace').read()
+        for old in sorted(old_names, key=len, reverse=True):
+            if old:
+                txt = txt.replace(old, new_name)
+        if fn == '.project':   # 兜底：<name> 字段必须就是新工程名
+            txt = re.sub(r'<name>[^<]*</name>', '<name>%s</name>' % new_name,
+                         txt, count=1)
+        open(p, 'w', encoding='utf-8').write(txt)
     # 3. 更新 .settings 分辨率
     prefs = os.path.join(root, '.settings', 'com.zksw.flythings.easyui.prefs')
     if os.path.isfile(prefs):
