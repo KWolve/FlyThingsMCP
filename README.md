@@ -146,7 +146,7 @@ pip install -r requirements.lock      # 已锁定实测通过的组合（含 mcp
 
 > **MCP 版本是多少？**
 
-应返回：`flythings-kb-open 0.27.68-open`，包含 34 个工具（另含 `binTools` 字段：设备端预编译工具 touch/busybox/ui_test/mt_test/zkshot，在 `bin_tools/<平台>/` 下，**不是 op、不占 op 名额**）。
+应返回：`flythings-kb-open 0.27.78-open`，包含 34 个工具（另含 `binTools` 字段：设备端预编译工具 touch/busybox/ui_test/mt_test/zkshot，在 `bin_tools/<平台>/` 下，**不是 op、不占 op 名额**）。
 
 ---
 
@@ -160,7 +160,7 @@ pip install -r requirements.lock      # 已锁定实测通过的组合（含 mcp
 - 模型不可用时自动降级 **BM25**（并在 `warnings` 里显式说明），永不失联
 
 ### 🏭 全流程开发
-- **创建项目**：从内置 HelloWord 模板（F133/F135/Z21/T113/V85X/Z20）一键创建
+- **创建项目**：从内置 HelloWord 模板（F133/F135/Z21/T113/V85X/Z20/Z235X）一键创建
 - **布局设计**：HTML 原型 → FTU 布局 → 一键打包
 - **预览确认**：HTML 预览稿，或直接用 FlyThings IDE 预览/编辑 ftu 文件（多整屏 window 工程自动出「页面切换条」+ `#window__N` hash 直达 + 「显示隐藏」幽灵框）
 - **编译交付**：内置 fui/fun 工具链，`build_ui_flow` 一键编译推送
@@ -255,7 +255,7 @@ flythings-mcp-open/
 ├── tests/                 # 契约用例（离线，137 项；见 tests/README.md）
 ├── models/bge-small-zh/   # ★ 本地向量模型（onnx + tokenizer）
 ├── toolchain/             # ★ 编译工具链（fui.exe + fun.exe）
-├── templates/             # ★ 项目模板（HelloWord_F133/F135/Z21/T113/V85X/Z20）
+├── templates/             # ★ 项目模板（HelloWord_F133/F135/Z21/T113/V85X/Z20/Z235X）
 ├── ui_tools/              # 布局转换/预览工具（html2json/json2html/check_all/gen_res）
 ├── components/            # ★ 可复用组件（随 MCP 一起发布，AI 可直接取用）
 │   ├── README.md          #   组件规范：四件套 + 两种形态 + 代码规范

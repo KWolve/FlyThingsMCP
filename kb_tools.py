@@ -53,15 +53,16 @@ except Exception:
     dss = None
 
 # ========== MCP 版本号（每次发布递增，AI/用户可查询确认是否最新）==========
-MCP_VERSION = '0.27.68-open'
-MCP_BUILD = '2026-09-16'
+MCP_VERSION = '0.27.78-open'
+MCP_BUILD = '2026-09-17'
 MCP_FEATURES = [
+    '2026-09-17: **Z235X 平台入库（IDE 模板 + platforms 登记 + bin_tools 占位说明）** v0.27.78-open（钟工给 IDE 工程 HelloWord_z235x，要求入库并两个 MCP 都发）——① 新增 `templates/HelloWord_Z235X`（22 文件，与 HelloWord_Z21 同构；源工程 `Release/` 构建产物不入库），依赖 easyui 2.9.0 / log 1.0.0 / zkhardware 1.1.0 / zknet 1.1.0；② `platforms.py`：Z235X 从 `PACKAGE_ONLY` 移入 `PLATFORMS`（arch=arm、template=HelloWord_Z235X、binTool=z235x；chip SSD2355）；③ 设备端预编译工具（touch/busybox/ui_test/mt_test/zkshot）**尚未编译**，`bin_tools/z235x/README.md` 如实占位、不伪造二进制；`_bin_tools` / mcp_extras 遍历排除 `.md`（占位说明不算工具）；④ 顺带修 WheelPicker 包里 4 处隐私命中（本机绝对路径 + 内网 IP → 环境变量/占位）。门禁 `check_consistency --with-tests` 与 `release_gate.py` 全绿。',
     '2026-09-16: 多设备设备选择修正 v0.27.68-open——①**行为修正**：`fun launch` **支持** `-s <serial|IP>`（旧说明「不支持 -s」作废）；多台 adb 设备同时在线（如 USB + WiFi adb）时不显式指定设备号，fun 会**静默取 `adb devices` 列表第一个**（不报错/不警告）→ 可能推到另一台机器上，症状是「改完 UI、编译通过、launch 看着成功但界面不变」；②**MCP 侧**：`flythings_build_ui_flow` 的 `device` 参数现在真正生效（内部追加 `-s <device>`）；未指定 device 且检测到 >1 台在线设备时在返回体里给 `warnings`（不静默）；③**判据**：比对设备与本地 `ui/*.ftu`（字节数 + md5 应一致，设备侧用已推送的 `/tmp/busybox md5sum`）；④知识库新增 `knowledge/devflow/cli-fun-toolchain.md` §7（机制/危害/正确做法/判据命令/WiFi adb 用法）。',
     '2026-09-15: 公开版（release）对齐 v0.27.65-open——开放范围＝平台通用能力：基础 UI 控件/布局工具链、'
     'GPIO/串口等硬件控制（hardware API）、USB/UVC 通用接入、WiFi 与蓝牙（BLE 组件）、V85X 硬件 H264 解码/显示/存储、'
     '平台与型号库、调试工具；涉及 accessKey 的保密协议栈能力不在公开版内。',
-    '平台矩阵（platforms.py 单一真相）：可建工程 F133(RISC-V) / F135 / T113 / V85X / Z20 / Z21；'
-    '仅依赖包生态 Z6S / Z261 / Z235X / H500S / A33NOR（有包、无模板，会明确说明原因）。',
+    '平台矩阵（platforms.py 单一真相）：可建工程 F133(RISC-V) / F135 / T113 / V85X / Z20 / Z21 / Z235X；'
+    '仅依赖包生态 Z6S / Z261 / H500S / A33NOR（有包、无模板，会明确说明原因）。',
     '硬件型号库：flythings_hardware_info 按平台/型号查分辨率、按键值、接口规格与平台差异（无型号时平台+分辨率即可开工）。',
     'UI 工具链：html→json、json→ftu、预览稿（多整屏 window 自带翻页条）、可视化拖拽编辑 + 像素 diff 验收、'
     '资源生成与产物核对、设计令牌漂移检测、多语言 i18n。',
@@ -109,8 +110,10 @@ def _bin_tools() -> dict:
         d = os.path.join(BIN_TOOLS, plat)
         if not os.path.isdir(d):
             continue
+        # 说明文件（README.md）不算设备端工具——bin_tools/z235x 目前只有占位说明
         files = sorted(f for f in os.listdir(d)
-                       if os.path.isfile(os.path.join(d, f)) and not f.startswith('.'))
+                       if os.path.isfile(os.path.join(d, f)) and not f.startswith('.')
+                       and not f.lower().endswith('.md'))
         if files:
             out[plat] = files
     return out
