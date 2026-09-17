@@ -9,6 +9,10 @@
    字段规范以 `knowledge/uicontrols/*.md`（layout-audit / edittext-fields / image-path-rule / nine-patch-rule / scrollwindow-layout 等）为准
 2. **官方文档站**：`https://developer.flythings.cn/`（控件/API/回调官方说明）
 
+> 例外（跨框架映射）：查「别的框架的某个控件对应我们哪个控件」不是控件用法查询，
+> 权威表在 `components/ui_v1/control-map.md`（摘要 + 指针：`knowledge/uicontrols/framework-control-mapping.md`）。
+> 映射完**怎么写字段/API**仍按本规则：只查 MCP 知识库或官方站。
+
 ## 禁止的行为
 
 - ❌ 用通用 web 搜索查「XXX 控件怎么用」——返回的是其他框架的答案
@@ -21,9 +25,9 @@
 
 ## Package API 识别规则（沛哥 2026-09-09 定规，区别于控件 json 字段）
 
-- **FlyThings/依赖 package（预编译闭源 .so + include 头文件）的 C++ API**：**只通过包内头文件识别**——类/方法签名/枚举/常量/注释是官方接口声明，可信来源（如平台方媒体栈的 `mpi/*.h`、easyui 的 `control/ZKVideoView.h` 方法注释）
+- **FlyThings/依赖 package（预编译闭源 .so + include 头文件）的 C++ API**：**只通过包内头文件识别**——类/方法签名/枚举/常量/注释是官方接口声明，可信来源（如 （内部录制组件） 的 `mpi/*.h`、easyui 的 `control/ZKVideoView.h` 方法注释）
 - **不要猜**：头文件读不出/不确定 → 如实标注「未收录/不确定」，问沛哥或官方，**禁止编造 API**（不会就是不会）
-- **不要反编译/扒二进制**：禁止 objdump/反编译 .so 提取接口或语义（浪费时间且拿不到语义）；readelf 仅限**排障**用（查依赖/符号缺失，dlopen 失败 SOP 以平台方 SDK 文档为准），不是 API 识别手段
+- **不要反编译/扒二进制**：禁止 objdump/反编译 .so 提取接口或语义（浪费时间且拿不到语义）；readelf 仅限**排障**用（查依赖/符号缺失，dlopen 失败 SOP 见 `v85x/（内部录制组件）-runtime-compat.md`），不是 API 识别手段
 - **区分两层**（与上文 easyui 禁止条款不冲突）：
   - 头文件能确认的 = **API 签名/枚举/常量/注释** → 读头文件（本条规则）
   - 头文件表达不了的 = **控件 json 字段/回调语义/内部实现** → 走 wiki/knowledge（上文规则），没有就标未收录

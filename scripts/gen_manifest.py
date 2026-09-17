@@ -37,6 +37,7 @@ RISK = {
     'flythings_get_version': 'read',
     'flythings_knowledge_search': 'read',
     'flythings_hardware_info': 'read',
+    'flythings_map_control': 'read',
     'flythings_read_json': 'read',
     'flythings_get_project_spec': 'read',
     'flythings_validate_project': 'read',
@@ -75,6 +76,7 @@ CATEGORY = {
     'flythings_get_version': 'kbase',
     'flythings_knowledge_search': 'kbase',
     'flythings_hardware_info': 'kbase',
+    'flythings_map_control': 'layout',
     'flythings_read_json': 'layout',
     'flythings_get_project_spec': 'layout',
     'flythings_validate_project': 'layout',
@@ -113,7 +115,7 @@ CLI_NAMES = {
     'fun': 'FlyThings 工程工具（create/install/build/launch，<项目>/.fun/<平台>/ 下）',
     'fui': 'FTU 布局工具——当前内置版本只支持 pack（json → ftu）；unpack 是空壳（调用报通用错误），不要依赖',
     'fyx': '旧版打包/发布 CLI 名（历史遗留，等价于 fun 的早期名）',
-    'fuse': '本机 workspace 的引擎 CLI（本机 workspace 的引擎 CLI，非本仓库内置）',
+    'fuse': '本机 workspace 的引擎 CLI（projects/fuse.exe，非本仓库内置）',
 }
 
 

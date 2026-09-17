@@ -38,8 +38,7 @@ PLATFORMS = {
     },
     'T113': {
         'arch': 'arm', 'template': 'HelloWord_T113', 'binTool': 't113',
-        'alias': ('T113EMMC', 'T113STDCXX'),
-        'note': 'ARM（车载互联常用）；现有 easyui < 2.9.0，无 relayout（运行时换布局不可用）',
+        'alias': ('T113EMMC', 'T113STDCXX'), 'note': 'ARM，车载互联常用',
     },
     'V85X': {
         'arch': 'arm', 'template': 'HelloWord_V85X', 'binTool': 'v85x',
@@ -47,11 +46,11 @@ PLATFORMS = {
     },
     'Z20': {
         'arch': 'arm', 'template': 'HelloWord_Z20', 'binTool': 'z20',
-        'alias': (), 'note': 'ARM；现有 easyui < 2.9.0，无 relayout（运行时换布局不可用）',
+        'alias': (), 'note': 'ARM',
     },
     'Z21': {
         'arch': 'arm', 'template': 'HelloWord_Z21', 'binTool': 'z21',
-        'alias': (), 'note': 'ARM；现有 easyui < 2.9.0，无 relayout（运行时换布局不可用）',
+        'alias': (), 'note': 'ARM',
     },
     'Z235X': {
         'arch': 'arm', 'template': 'HelloWord_Z235X', 'binTool': 'z235x',

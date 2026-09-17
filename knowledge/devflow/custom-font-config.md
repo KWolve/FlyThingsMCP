@@ -54,7 +54,7 @@
 ```bash
 python components/fonts/scripts/device_font_check.py          # 体检（出口码 1 = 缺中文）
 python components/fonts/scripts/device_font_check.py --apply \
-       --project projects/YourProject --tier common                       # 缺就投递进工程 font/
+       --project projects/（内部面板工程） --tier common                       # 缺就投递进工程 font/
 ```
 
 判定口径（getprop 拿平台信息 + 读 `/etc/font` `/res/font` 等目录里**字体文件的体积**）：
@@ -97,7 +97,7 @@ python components/fonts/scripts/device_font_check.py --apply \
 |---|---|---|
 | **中文（默认字体必须选它）** | `zkswe-hans-common.ttf`（872 KB，思源黑体常用字 3755 + 标点 + ASCII） | `components/fonts/fonts/` |
 | 中文（生僻字/多语言） | `zkswe-hans-full.ttf`（7.4 MB）/ `zkswe-hans-multi.ttf`（10.5 MB） | 同上 |
-| 拉丁 / 数字（几何无衬线，接近设计稿数字） | `Poppins-SemiBold.ttf` / `Poppins-Bold.ttf`（GILROY 等几何体同理） | `projects/YourProject/app/resources/fonts/` 等 |
+| 拉丁 / 数字（几何无衬线，接近设计稿数字） | `Poppins-SemiBold.ttf` / `Poppins-Bold.ttf`（GILROY 等几何体同理） | `projects/inSightOS3/app/resources/fonts/` 等 |
 
 ### C. 落地 4 步（fun 流程）
 1. `<项目>/font/` 放 ttf（**文件名决定默认**，见 §D）

@@ -15,7 +15,7 @@
 ## 2. 新增/更新文档流程（照此做）
 
 1. **只改 `knowledge/<分类>/<文档>.md`**——不 Copy 到 wiki（wiki 官方镜像与 knowledge 实践内容互不复制）
-2. 文档头部写检索导引（命中条件，参考现有文档格式）；内部引用用相对路径（如 `devflow/ui-layout-verify.md`）或 `knowledge/` 前缀，**不引用 wiki 实践副本路径**
+2. 文档头部写检索导引（命中条件，参考现有文档格式）；内部引用用相对路径（如 `v85x/（内部录制组件）-runtime-compat.md`）或 `knowledge/` 前缀，**不引用 wiki 实践副本路径**
 3. 改完：`kb_tools.py` 版本递增 + `MCP_FEATURES` 顶部加一条精华摘要（版本史唯一来源；CHANGELOG.md 自 v0.27.31 起已冻结，不再维护）
 4. `python rebuild_index_local.py` 重建索引（默认收 wiki 官方 + knowledge 实践，无重复）
 5. commit + push origin（release 同步走 PUBLISH.md 流程）
@@ -26,5 +26,5 @@
 - **MCP_FEATURES 精简**：治理约定 = 只保留近期精华 + 能力概括；完整史看 `compact=False` 全量（CHANGELOG.md 已冻结为历史归档）
 
 ## 4. 红线
-- 真实 accessKey / 内部工程名不进公开分发内容（内部版保留工程上下文，公开版一律去工程化）
-- 平台私有媒体栈与方案类文档只进内部版，不进公开版
+- 真实 accessKey / 内部工程名（CV201/（内部标记）/（内部测试工程） 等）不进 open 分发内容（master 内部版保留工程上下文，release 版去工程化）
+- v85x 深度、方案类（tuya/（内部语音组件）/（内部互联组件）/车载）只进内部 master，不进 release（PUBLISH.md §3）

@@ -28,10 +28,10 @@ python components/fonts/scripts/device_font_check.py
 
 # ② 缺就投递（默认常用中文版；把字体塞进工程 font/ 并改 .settings 的 easyui prefs）
 python components/fonts/scripts/device_font_check.py --apply \
-       --project projects/YourProject --tier common
+       --project projects/（内部面板工程） --tier common
 
 # ③ 重新出包（app 的升级包会整体替换 /res，字体必须随包走）
-cd projects/YourProject && ./fun.exe build      # 或 flythings_build_ui_flow
+cd projects/（内部面板工程） && ./fun.exe build      # 或 flythings_build_ui_flow
 flythings_pack_upgrade(project_root=..., release_version=...)   # 出 update.img
 # ④ ADB 固化刷机（详见组件规范里的 platforms.md）
 ```
@@ -76,7 +76,7 @@ python components/fonts/scripts/gen_font_subset.py \
 - `--src-multi`：多国语言用，**必须含谚文/假名/扩展B 的完整版**（CN 变体会缺谚文，实测 0 个）
 - 手上可用的两份源（本机）：
   - CN 版：`tools/FlyThingsIDE/bin/configuration/org.eclipse.osgi/551/0/.cp/bundle/font/SourceHanSansCN-Normal.ttf`
-  - 完整版：思源黑体 SC 原始字体（SourceHanSansSC-Normal.ttf）
+  - 完整版：`projects/（内部学习工程）/（内部仪表工程）/BMW/font/aaaSourceHanSansSC-Normal.ttf`
 
 ---
 
@@ -93,11 +93,5 @@ python components/fonts/scripts/gen_font_subset.py \
 |---|---|
 | 三版本裁剪 | ✅ 已产出并逐版核验覆盖（ASCII/CJK/扩展A/扩展B/假名/谚文逐段计数） |
 | 设备自检脚本 | ✅ 真机跑通（V85X SPINOR：正确识别 20.7KB 无中文 / 2.5MB 有中文） |
-| 投递 + 固化 | ✅ 已在 app 工程 `projects/YourProject` 验证（汉字正常显示，见 platforms.md） |
+| 投递 + 固化 | ✅ 已在 app 工程 `projects/（内部面板工程）` 验证（汉字正常显示，见 platforms.md） |
 | 非 V85X 平台 | ⏳ 仅在 V85X 实测；其它平台请按 platforms.md 补实测值 |
-
-## 授权（必读）
-
-- 字库源自 **思源黑体（Source Han Sans）**，按其授权 **SIL Open Font License 1.1** 分发，全文见同目录 LICENSE.txt。
-- 本目录三个 ttf 均为**子集化产物**（按项目字表裁剪）＝ OFL 的 Modified Version：已不使用保留字体名（内部名与文件名均为 zkswe-hans-*）。
-- 再分发/内嵌进产品：**必须随附本目录的 LICENSE.txt 与版权声明**（OFL 第 2 条）。
