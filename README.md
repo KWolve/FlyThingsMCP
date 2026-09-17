@@ -20,7 +20,7 @@
 **方式一：让 AI 帮你装（推荐）** —— 直接对你的 AI 说：
 
 ```
-帮我克隆并安装 https://gitee.com/Kwolve/fly-things-os_-mcp 项目
+帮我克隆并安装 https://gitee.com/Kwolve/flythingsmcp_release 项目
 ```
 
 AI 会自动完成：克隆项目 → 安装依赖 → 引导配置 → 完成。
@@ -29,7 +29,7 @@ AI 会自动完成：克隆项目 → 安装依赖 → 引导配置 → 完成�
 
 ```bash
 # 1) 获取代码
-git clone https://gitee.com/Kwolve/fly-things-os_-mcp.git
+git clone https://gitee.com/Kwolve/flythingsmcp_release.git
 
 # 2) 安装依赖（requirements.lock = 已锁定实测通过的版本组合）
 pip install -r requirements.lock      # 含 mcp / onnxruntime / tokenizers / Pillow
