@@ -520,9 +520,9 @@
     }
   ],
   "docs": {
-    "knowledgeFiles": 66,
-    "wikiFiles": 128,
-    "ragChunks": 1420,
-    "ragPaths": 194
+    "knowledgeFiles": 52,
+    "wikiFiles": 0,
+    "ragChunks": 541,
+    "ragPaths": 52
   }
 }
