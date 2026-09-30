@@ -13,6 +13,8 @@
 
 </div>
 
+**中文** ｜ [English](README.en.md)
+
 ---
 
 ## ① 一键安装
