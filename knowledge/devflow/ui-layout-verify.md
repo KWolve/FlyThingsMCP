@@ -1,5 +1,21 @@
+---
+id: devflow-ui-layout-verify
+title: UI 布局可视化编辑与像素验收（json 为源 · 拖拽微调 · 0 token 校验）
+category: devflow
+status: review
+confidence: manual
+verified_at: 2026-09-29
+stale_days: 180
+origin: total
+source: 2026-09-29 front-matter 迁移（P1：先显式登记"待补可执行判据"）
+needs_evidence: true
+platforms: []
+tags: [⚠️ v0, 27, action=]
+evidence: []
+---
 # UI 布局可视化编辑与像素验收（json 为源 · 拖拽微调 · 0 token 校验）
 
+> 检索导引：问「布局位置不对 / 想拖控件微调 / 图片与控件尺寸对不上（含 thumb.size）/ 要像素回归对比 / 多页工程预览怎么切页」→ 本文（三段式验收总纲）；三个 action 的细节见 `devflow/ui-editor-usage.md`。
 > ⚠️ v0.27.37 起三个 op 合并为 `flythings_ui_visual(action=...)`：`"editor"` / `"edit_apply"` / `"diff"`
 > （旧名 `flythings_ui_editor` / `flythings_ui_edit_apply` / `flythings_ui_diff` 不再提供）。
 
@@ -177,6 +193,24 @@ logic.cc 里用 `showWnd()/hideWnd()` 切页」（弹窗、设置页、二级页
 
 完整口径与量化数字（形状分类出图 / 抗锯齿档位）见 `ui-asset-rules.md` §2 铁律 #1 与 #8。
 
+### 3-1 代码侧：运行期设的图也要核（v0.27.90 起，`check_all` 第 20 项）
+
+上一节核的都是 **json 里声明**的图；`mXXXPtr->setBackgroundPic("images/x.png")` 这类
+**运行期设图**以前是盲区（案例实测：48×16 三点图进了被抬高的 48×26 盒 → 引擎按盒拉伸 →
+正圆变竖椭圆，静态全检一路 PASS）。现在 `check_all` **第 20 项**补上：
+
+| 面 | 口径 |
+|----|------|
+| 扫描 | `<项目>/src/**/*.cc`｜`*.cpp` 里 `set…Pic("…")` 的**字面量**实参（去注释保行号；三元式多个字面量一并查） |
+| 目标 | `mXxxPtr` → caption `Xxx`（同第 6 项）；映射不到 → `unresolved[]` 列出，**不静默跳过** |
+| FAIL | `resources/images/` 的自动生成图 != 控件盒（同一 caption 在**任一页**对上就算对） |
+| NOTE | 手绘图（`navi/` 等）!= 盒子 → `stretched[]` 仅提示（官方基准 `navi/fh.png` 44×26 → 72×40 按钮是合法拉伸）；`.9.png` 豁免 |
+| NOTE | 实参是变量/拼接（运行时才知道用哪张图）→ 只计 `dynamic`（案例 `ldFrame()` 拼路径就是这类） |
+
+零误报核查：`SampleUI-New` / `ShowcaseAlbum-F133` / `WebViewDemo` / TDesign 迁移案例双平台
+在 v0.27.90 下 **0 新增 FAIL**；把案例 `LdDots` 盒高改回 26（旧值）**当场报出**。
+口径与边界详见 `uicontrols/text-box-height-rule.md` §4/§5。
+
 ## 4. 变更写回（`flythings_ui_visual(action="edit_apply")`）
 
 用户在编辑器里改完 → 「复制变更 JSON」→ 传回 → 写回 json 并 **pack 成 ftu**：
@@ -222,6 +256,26 @@ logic.cc 里用 `showWnd()/hideWnd()` 切页」（弹窗、设置页、二级页
 分层省钱：**L1 像素 diff（0 token，默认）→ L2 需要语义判断时只把差异区域裁 200×200 小图给模型
 → L3 人工看标注图（0 token）**。
 
+### 5-1 像素基线库（`flythings_ui_visual(action="baseline")`）
+
+把「上一次验收通过的那张图」版本化存到 **`<项目>/ui_baseline/`**（`baseline.json` 索引 + 图片），
+下次验收直接比，**省掉人工看图**。必填 `project_root`；
+
+| `mode` | 作用 |
+|---|---|
+| `save` | 存基线（首次建基线用它） |
+| `compare` | 与基线比（+ `image_a`）；**容差档案随基线一起存**，所以比对口径与建基线时一致 |
+| `update` | 把当前图替换为基线 |
+| `list` | 列出现有基线 |
+
+⚠️ **比不到基线 → 返回 `no-baseline` 并进 `warnings`，不算通过**（不静默放过）。
+
+### 5-2 edit_apply 的写盘开关（默认安全）
+
+- `pack` **默认 False**（只写 json，不自动 pack ftu）——要 pack 得显式传 `pack=true`；
+- `dry_run=True` 只预览变更、**不写盘**；
+- 写回前一律留 `<name>.json.bak`（见 §4 安全措施）。
+
 ## 6. 图片资源路径（易错点，影响所有预览）
 
 json 里的图片引用是**相对 resources 目录、可带子目录**的路径：`audio/horn.png`、
@@ -244,11 +298,15 @@ json 同目录 → 项目根 → 再退 `.9.png` 九宫格变体；data URI 按�
 | **位置不对** | ① 转换时 CSS 的 padding/border/margin 参与了几何 ② 坐标取整偏差累积 ③ 嵌套 window 子坐标必须**相对父窗口** |
 | **切图不对** | 控件尺寸是照着 CSS 猜的，没看真实 PNG 尺寸 → 图片控件尺寸应取 PNG 实际尺寸；同一张图被多个不同尺寸控件引用＝靠缩放硬撑的信号 |
 | **预览丢图** | 资源路径解析（第 6 节），带子目录的引用最容易漏 |
+| **多屏设计稿只落地第一屏** | 转换器只取了第一个 `.screen`（旧版行为）-> 核 `screensDetected` == `pagesProduced` == 设计稿屏数 N；`.screen` 必须并列（嵌套/重名会 success:false，见 `devflow/prototype-flow.md`「分页落地清单」） |
 | **预览只看到首页 / 切不了页** | 整屏 window 多页架构 → 用预览稿顶部**页面切换条**或 `#window__N` hash 直达（第 2-2 节）；隐藏的弹窗用「显示隐藏」幽灵框。若预览稿里没有切换条，说明这个 json 确实只有一个整屏窗口（多半页面是 `showWnd()` 动态加载的另一 json，跑项目级预览就会出「项目页面」行） |
 | **文字被裁** | 文本估算宽度超控件宽，或字号 > 控件高 |
 
 ## 8. 改完布局的检查顺序
 
+0. **屏数核对**（交付前必做，2026-09-21 起）：设计稿 N 屏 <-> 产出 N 页 —— `flythings_html_to_json` 返回的
+   `screensDetected` 必须 == `pagesProduced` == N（不等即 `success:false`，先修 HTML）；同 ftu 形态数整屏
+   window 个数，独立 ftu 形态数 json/ftu 个数；预览还要能**切到每一页**（不能只看到首页，见第 2-2 节）
 1. `flythings_ui_visual(action="editor")` 生成编辑器，先看**红标**（图片尺寸不匹配优先修——那是锯齿/糊的根因）
 2. 拖 / 改属性 → 复制变更 JSON → `flythings_ui_visual(action="edit_apply")`（写回 + pack）
 3. `flythings_build_ui_flow` 推真机，`flythings_device_screenshot` 抓屏，与上一版截图 `flythings_ui_visual(action="diff")` 对比：

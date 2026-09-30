@@ -6,16 +6,34 @@
 再 fui pack 生成 ftu 交付设备端。替代每个项目手写 Builder/JSON。
 
 用法：
-    python html2json.py <input.html> [output.json] [--res WxH]
+    python html2json.py <input.html> [output.json|输出目录] [--res WxH] [--merge-windows]
+
+多屏（HTML 内多个 div.screen）默认口径（钟工 2026-09-21 口径，见 knowledge/devflow/page-architecture-spec.md）：
+**一个 .screen = 一个页面 = 一个 Activity = 一个独立 json（-> 一个独立 ftu）**；
+N 屏 -> N 个 json，文件名取 data-page（缺省 page_k），输出目录 = 输出参数所写目录。
+同屏内部的 window / dialog（弹窗）不是页，直接写在 .screen 里（div.window / div.modal）。
+- --merge-windows：N 屏合成同一 json 内的 N 个整屏 window（键 window__1..window__N 连续编号，
+  首屏 visible:true、其余 visible:false，切页走 showWnd/hideWnd）—— **仅当这些屏同属一个 Activity
+  （同 ftu 内整屏 window）**时才用。工具不主动把多个 .screen 合成多窗口。
+**页数 = 屏数**：screensDetected != pagesProduced 一律 success:false + error（不静默丢页）。
 
 受限 HTML 规范见 HTML_SUBSET.md（元素/class → FlyThings 控件映射表）。
 核心规则自动内建：
 - 控件键 `类型__N` 全局递增；ID 按类型分区；颜色十进制
+- 多屏 .screen：缺省每屏一个 json（一页一 Activity 一 ftu）；--merge-windows 才合并成多整屏 window
 - window 子控件嵌套其内（相对坐标）；弹窗 modal:true + visible:false
 - Z 序 = HTML 文档顺序（后定义在上层，弹窗最后）
 - 空文本不写 text 字段；edittext 自动 beepEnable/hintTextColor
-- ⚠️ 纯黑 #000000 会被当「未设置」（data-color/data-bg 走 `to_dec(...) or 默认值`，0 是 falsy）
-  → 要纯黑写 #010101（详细见 knowledge/devflow/html-subset-quickref.md）
+- ✅ 纯黑 #000000 按「属性出现性」判定（A2 修，2026-09-27）：data-color/data-color2/data-bg/
+  data-text-bg/data-hint-color 全走 `_color_explicit()`，不再被 `or 默认值` 吞掉；老工程
+  「纯黑写 #010101」的绕过写法继续有效（#010101 也是纯黑，不必回改）
+- ✅ 支持 `data-visible`（A5 修）：任意控件/容器（含 subItem、window）初始隐藏，直通 json 的 visible
+- ✅ 转换期静默改动一律进返回体 warnings（A1/A8 修）：丢字符（emoji/黑名单字）、有图控件
+  无圆角外底色、文本最小宽超出容器等不再靠真机反推
+- ✅ 有图控件的圆角外底色（A6 修）：data-bg > 最近祖先容器底色 > 引擎缺省（无底色时告警）
+
+⚠️ 设备端渲染路径差异（不是转换器问题，见 references/kb/image-gen-standard.md）：
+  运行时 setBackgroundPic 不保留 alpha（透明底 PNG 会变白块）—— 运行时换图那套素材需烘不透明底。
 """
 import html as html_lib
 import json
@@ -378,17 +396,63 @@ def _is_emoji(ch):
 _TEXT_BLACKLIST = set('⌫℃■●‹－＋–…→★◆▶▷①')
 
 
-def _clean_text(s):
-    """剥离 emoji 与黑名单特殊符号，只保留汉字+ASCII+基础符号（/ % # - _ 空格）。"""
+def _clean_text(s, ctx=None, where=''):
+    """剥离 emoji 与黑名单特殊符号，只保留汉字+ASCII+基础符号（/ % # - _ 空格）。
+
+    A1 修（2026-09-27）：命中黑名单/emoji 的字符**必须记账**。旧版直接 `continue` 静默丢弃，
+    真机表现为「整字消失」（不是方框），调用方查无实据；现在统一写进 ctx.warnings。
+    """
     if not s:
         return s
     out = []
+    dropped = []
     for ch in s:
         if ch in _TEXT_BLACKLIST or _is_emoji(ch):
+            if ch not in dropped:
+                dropped.append(ch)
             continue
         out.append(ch)
+    if dropped and ctx is not None and hasattr(ctx, 'warn'):
+        kind = 'emoji' if all(_is_emoji(c) for c in dropped) else '黑名单特殊符号'
+        ctx.warn('文本字符被丢弃（%s）：%s（设备裁剪字库无该字形 → 整字消失）%s —— '
+                 '改用图片素材或换字符（铁律 1）'
+                 % (kind, ' '.join(repr(c) for c in dropped),
+                    ('  @%s' % where) if where else ''),
+                 key='drop:%s:%s' % (kind, ''.join(sorted(dropped))))
     # \n（来自 <br>）保留为换行；其余空白折叠为单空格
     return re.sub(r'[ \t\r\f\v]+', ' ', ''.join(out)).strip()
+
+
+def _color_explicit(attrs, names, default):
+    """颜色取值（A2 修，2026-09-27）：**按「属性是否出现」判未设置**，不按「值是否为 0」。
+
+    纯黑 `#000000` 解析出来就是 0（合法颜色）；旧写法 `to_dec(...) or 默认` 把 0 当 falsy
+    → 纯黑被换成默认色（实测绿按钮落地成「绿底白字」，对比度 1.44:1）。
+    names 可传单个属性名或候选列表，按顺序取第一个「出现且可解析」；都没有 → default。
+    """
+    for n in (names if isinstance(names, (list, tuple)) else [names]):
+        raw = _attr(attrs, n)
+        if raw is None or str(raw).strip() == '':
+            continue
+        v = to_dec(raw)
+        if v is not None:
+            return v
+    return default
+
+
+def _bool_attr(attrs, name):
+    """三态布尔属性：出现且真值 → True；出现且 false/0/no/off → False；未出现 → None。
+
+    A5 修（2026-09-27）：`data-visible` 是 HTML 侧给「某控件初始就该隐藏」的唯一口
+    （旧版 html2json 不认该属性 → 只能靠运行时代码 patch，两处同步漏一处即静默失败）。
+    """
+    raw = _attr(attrs, name)
+    if raw is None:
+        return None
+    v = str(raw).strip().lower()
+    if v in ('false', '0', 'no', 'off', 'n'):
+        return False
+    return True
 
 
 # ---------- DOM 树节点 ----------
@@ -457,6 +521,19 @@ class _Ctx:
         self.root = None
         self.stack = []          # 打开的容器栈（window/listview/radiogroup dict）
         self.warnings = []
+        self.warned = set()      # 去重键（A8：同一类丢弃/替默认值只报一次，不刷屏）
+
+    def warn(self, msg, key=None):
+        """转换期警告统一入口（去重）。
+
+        A8 修（2026-09-27）：「丢字符 / 纯黑被替默认值 / data-visible 无效 / 圆角无底色」
+        这类**静默失败**必须回传到返回体 warnings，不再靠真机反推。
+        """
+        k = key or msg[:80]
+        if k in self.warned:
+            return
+        self.warned.add(k)
+        self.warnings.append(msg)
 
     def key(self, typ):
         self.n += 1
@@ -620,11 +697,11 @@ class HtmlToJson:
         raw_text = re.sub(r'[ \t\r\f\v]+', ' ', node.text).strip()
         if raw_text and not _clean_text(raw_text) and any(_is_emoji(ch) for ch in raw_text):
             emoji_ch = next((ch for ch in raw_text if _is_emoji(ch)), '\u2b50')
-            size = max(w, h)
             name = f'emoji_{cap or ctx.n}_{self.gen_count}.png'
 
-            def _e(d, _n=name, _s=size, _c=emoji_ch):
-                return gr.emoji_icon(d, _n, _s, _c)
+            # [!] 2026-09-18：按**控件盒 (w,h)** 出图（不再 max(w,h) 出方图）——图 != 盒会把字形压扁/切掉
+            def _e(d, _n=name, _w=w, _h=h, _c=emoji_ch):
+                return gr.emoji_icon_box(d, _n, _w, _h, _c)
 
             pic = self._gen_asset(_e)
             if pic:
@@ -654,37 +731,204 @@ class HtmlToJson:
 
         return out
 
-    def convert(self, text):
+    def convert(self, text, merge_windows=False):
+        """受限 HTML -> (pages, warnings, meta)。
+
+        pages = [(page_id, data), ...]（失败/屏数核对不过时为 None）：
+          - 单屏（1 个 .screen）：len==1，产物与旧版逐字段一致（回归保护）；
+          - **缺省口径（钟工 2026-09-21）：每屏一个 json** —— 一个 .screen = 一个页面 =
+            一个 Activity = 一个独立 ftu；len==N，data 是普通单屏 json 的根
+            （同屏内部的 window/dialog 不是页，写在 .screen 里即可）；
+          - merge_windows=True（CLI --merge-windows）：N 屏合成**同一 json** 内的 N 个整屏
+            window（键 window__1..window__N 连续编号，首屏 visible:true、其余 visible:false，
+            切页走 showWnd/hideWnd）—— **仅当这些屏同属一个 Activity**时才用；
+            此时 len==N（逐页列出，都指向同一个 json），**页数 = 屏数，一屏不许丢**。
+        meta = {screensDetected, pagesProduced, mode, failed[], error?}；
+        mode in (single-screen / per-screen / merge-windows)；
+        screensDetected != pagesProduced 一律写 meta['error']（禁止再静默丢页）。
+        """
         p = _DomParser()
         p.feed(text)
         p.close()
         if p.root is None:
-            return None, ['空 HTML']
-        screen = self._find_screen(p.root)
-        if screen is None:
-            return None, ['未找到 <div class="screen"> 根节点（受限 HTML 必须从 screen 容器开始）']
+            return None, ['空 HTML'], None
+        screens, nested = self._find_screens(p.root)
+        if not screens:
+            return None, ['未找到 <div class="screen"> 根节点（受限 HTML 必须从 screen 容器开始）'], None
+        mode = ('merge-windows' if (merge_windows and len(screens) > 1)
+                else ('single-screen' if len(screens) == 1 else 'per-screen'))
+        meta = {'screensDetected': len(screens), 'pagesProduced': 0, 'failed': [], 'mode': mode}
+        warnings = []
+        # 嵌套 .screen：从 error 降为 warning（既有输入不许突然跑不过），但必须点名（不许静默）
+        if nested:
+            warnings.append('检测到 %d 个嵌套 .screen（位于另一个 .screen 内部）：%s —— '
+                            '按**最外层**算页，这些嵌套屏的容器被忽略（屏内控件仍属于最外层页）；'
+                            '规范写法是并列 .screen（每屏一个、data-page 区分）'
+                            % (len(nested), ' / '.join(self._nest_label(n, i)
+                                                       for i, n in enumerate(nested, 1))))
+        if mode == 'merge-windows':
+            warnings.append('识别到 %d 个 .screen（多屏设计稿）：%s'
+                            % (len(screens),
+                               ' / '.join(self._page_label(n, i)
+                                          for i, n in enumerate(screens, 1))))
+            warnings.append('本次按 merge-windows 合成：已把 %d 个 .screen 合成到同一个 json 的 %d 个'
+                            '整屏 window（window__1..window__%d 连续编号，首屏 visible:true、'
+                            '其余 visible:false，切页走 showWnd/hideWnd）—— 只在**这些屏同属一个 '
+                            'Activity（同 ftu 内整屏 window）**时用；跨业务域 / 需独立返回栈请去掉'
+                            '这个开关（缺省口径 = 每屏一个 json = 每屏一个 Activity 各自独立 ftu）'
+                            % (len(screens), len(screens), len(screens)))
+            data, w, made_ids = self._compose_windows(screens, meta)
+            warnings += w
+            pages = [(pid, data) for pid in made_ids] if data is not None else []
+        elif mode == 'single-screen':
+            data, w = self._convert_one(screens[0])
+            warnings += w
+            pages = [(self._page_id(screens[0], 1), data)]
+            meta['pagesProduced'] = 1
+        else:
+            warnings.append('识别到 %d 个 .screen（多屏设计稿）：%s'
+                            % (len(screens),
+                               ' / '.join(self._page_label(n, i)
+                                          for i, n in enumerate(screens, 1))))
+            warnings.append('缺省口径：**每屏一个 json**（一个 .screen = 一个页面 = 一个 Activity = '
+                            '一个独立 ftu），文件名取 data-page：%s。同一 Activity 内的 '
+                            'window / dialog（弹窗）属于该屏**内部**，直接写在 .screen 里'
+                            '（div.window / div.modal），不另算一页、工具也不会把多个 .screen 合并；'
+                            '哪些屏属于不同 Activity、哪些属于同屏内 window/dialog，由 AI 在设计阶段'
+                            '（HTML 原型）判定。只有**同属一个 Activity 的多个整屏 window**才用 '
+                            '--merge-windows（MCP: merge_windows=true）合成一个 json'
+                            % ' / '.join('%s.json' % self._page_id(n, i)
+                                         for i, n in enumerate(screens, 1)))
+            pages, seen = [], set()
+            for k, node in enumerate(screens, 1):
+                pid = self._page_id(node, k)
+                if pid in seen:
+                    meta['failed'].append('%s（第 %d 屏：data-page 重复，每屏一个 json 会互相覆盖）'
+                                          % (pid, k))
+                    continue
+                seen.add(pid)
+                try:
+                    data, w = self._convert_one(node)
+                except Exception as e:
+                    meta['failed'].append('%s（第 %d 屏转换失败: %s: %s）'
+                                          % (pid, k, type(e).__name__, e))
+                    continue
+                warnings += w
+                pages.append((pid, data))
+            meta['pagesProduced'] = len(pages)
+        if meta['pagesProduced'] != meta['screensDetected']:
+            meta['error'] = ('屏数核对失败：识别到 %d 个 .screen，仅产出 %d 页%s。'
+                             '禁止静默丢页 —— 请修正 HTML（每屏一个并列 .screen，'
+                             'data-page 唯一）后重转'
+                             % (meta['screensDetected'], meta['pagesProduced'],
+                                ('，失败：' + '；'.join(meta['failed']))
+                                if meta['failed'] else ''))
+            return None, warnings, meta
+        return pages, warnings, meta
+
+    def _page_id(self, node, k):
+        """页 id = .screen 的 data-page（缺失则 page_k）；去掉文件名不安全字符（保留汉字）。"""
+        pid = str(_attr(node.attrs, 'data-page') or '').strip()
+        if not pid:
+            return 'page_%d' % k
+        return re.sub(r'[\\/:*?"<>|\s]+', '_', pid) or ('page_%d' % k)
+
+    def _page_label(self, node, k):
+        """warnings 里的页名：id（data-page-name 有则带中文名）。"""
+        pid = self._page_id(node, k)
+        nm = str(_attr(node.attrs, 'data-page-name') or '').strip()
+        return '%s(%s)' % (pid, nm) if nm else pid
+    def _nest_label(self, node, k):
+        """warnings 里嵌套 .screen 的名字：data-page 有则用它，否则「嵌套屏k」。"""
+        pid = str(_attr(node.attrs, 'data-page') or '').strip()
+        return pid if pid else ('嵌套屏%d' % k)
+
+
+    @staticmethod
+    def _strip_markers(d):
+        """清理转换期内部标记（__ 前缀键）；递归。"""
+        for k in [k for k in d if k.startswith('__')]:
+            del d[k]
+        for v in d.values():
+            if isinstance(v, dict):
+                HtmlToJson._strip_markers(v)
+            elif isinstance(v, list):
+                for x in v:
+                    if isinstance(x, dict):
+                        HtmlToJson._strip_markers(x)
+
+    def _convert_one(self, node):
+        """单屏转换（一个 .screen -> 一个独立 json 的根）；返回 (data, warnings)。"""
         ctx = _Ctx()
         self.ctx = ctx
-        self._open_screen(ctx, screen)
-        for ch in screen.children:
+        self._open_screen(ctx, node)
+        for ch in node.children:
             self._walk(ctx, ch)
-        # 清理内部标记
-        def _clean(d):
-            for k in [k for k in d if k.startswith('__')]:
-                del d[k]
-            for v in d.values():
-                if isinstance(v, dict):
-                    _clean(v)
-                elif isinstance(v, list):
-                    for x in v:
-                        if isinstance(x, dict):
-                            _clean(x)
         if ctx.root:
-            _clean(ctx.root)
+            self._strip_markers(ctx.root)
             self._fix_slidewindow_icon_size(ctx.root)
         return ctx.root, ctx.warnings
 
-    def _fix_slidewindow_icon_size(self, root):
+    def _compose_windows(self, screens, meta):
+        """N 屏 -> 同一 json 内 N 个整屏 window（**merge-windows 口径**，页数 = 屏数）。
+
+        只在「这些屏同属一个 Activity（同 ftu 内整屏 window）」时用；缺省口径是每屏一个 json。
+        键先占号（window__1..window__N 连续），再逐屏把子控件写进对应 window，
+        避免页内嵌套 window 抢占页号。某屏转换失败 -> 记 failed 并跳过（上层据此报错，
+        不静默丢页）。返回 (data, warnings, made_ids)：made_ids = 成功合成的页 id 列表。
+        """
+        first = screens[0]
+        W, H = self._screen_size(first)
+        ctx = _Ctx()
+        self.ctx = ctx
+        self._open_screen(ctx, first)          # 根：分辨率/背景/根 position 取首屏
+        keys = [ctx.key('window') for _ in screens]
+        made = 0
+        made_ids = []
+        for k, (key, node) in enumerate(zip(keys, screens), 1):
+            attrs = node.attrs
+            page = self._page_id(node, k)
+            c = {'backgroundColor': -1, 'caption': page,
+                 'hideTimeOut': -1, 'id': ctx.nid('window'),
+                 'modal': False,
+                 'position': {'height': H, 'left': 0, 'top': 0, 'width': W},
+                 'touchable': False, 'visible': (k == 1)}
+            bg = to_dec(_attr(attrs, 'data-background'))
+            if bg is None:
+                bg = to_dec(_attr(attrs, 'data-bg'))
+            if bg is not None:
+                c['backgroundColor'] = bg
+            hto = parse_px(_attr(attrs, 'data-hide-timeout'))
+            if hto is not None:
+                c['hideTimeOut'] = hto
+            pic = _attr(attrs, 'data-pic')
+            if pic:
+                c['backgroundPic'] = pic if '/' in pic else 'images/' + pic
+            try:
+                ctx.root[key] = c
+                ctx.stack.append(c)
+                for ch in node.children:
+                    self._walk(ctx, ch)
+                ctx.stack.pop()
+            except Exception as e:
+                ctx.stack = []
+                ctx.root.pop(key, None)
+                meta['failed'].append('%s（第 %d 屏转换失败: %s: %s）'
+                                      % (page, k, type(e).__name__, e))
+                continue
+            made += 1
+            made_ids.append(page)
+            ctx.warnings.append('第 %d 屏 %s -> %s（caption=%s，visible=%s）'
+                                % (k, self._page_label(node, k), key, page,
+                                   'true' if k == 1 else 'false'))
+        if ctx.root:
+            self._strip_markers(ctx.root)
+            # 多屏合成：slidewindow 落在整屏 window 内，必须递归才不漏回填 iconSize
+            self._fix_slidewindow_icon_size(ctx.root, recursive=True)
+        meta['pagesProduced'] = made
+        return ctx.root, ctx.warnings, made_ids
+
+    def _fix_slidewindow_icon_size(self, root, recursive=False):
         """SlideWindow 图标布局铁律（沛哥 2026-09-01）：iconSize 必须按实际图片尺寸，
         不是控件平分格子大小（默认 128 会导致图标位置不对/拉伸）。
         HTML 未显式指定 data-icon-w/h 时，尝试从 items 首张图片读实际尺寸回填；
@@ -715,9 +959,7 @@ class HtmlToJson:
                         continue
             return None
 
-        for key, val in list(root.items()):
-            if not (isinstance(val, dict) and key.startswith('slidewindow__')):
-                continue
+        for key, val in HtmlToJson._slidewindow_dicts(root, recursive=recursive):
             items = val.get('items') or []
             if not items:
                 continue
@@ -757,15 +999,48 @@ class HtmlToJson:
                     f'slidewindow {val.get("caption", key)}: 暂按首图尺寸 {w0}x{h0} 回填 iconSize，'
                     f'请统一图标尺寸后重转')
 
-    @staticmethod
-    def _find_screen(node):
-        if node.tag == 'div' and 'screen' in _classes(node.attrs):
-            return node
-        for ch in node.children:
-            r = HtmlToJson._find_screen(ch)
-            if r is not None:
-                return r
-        return None
+    @classmethod
+    def _find_screens(cls, root):
+        """收集全部 div.screen（文档顺序）。返回 (screens[], nested_nodes[])。
+
+        screens = **最外层** .screen（= 页）：嵌套在另一个 .screen 内部的**不计页**，
+        其容器被忽略、屏内控件仍按最外层页处理（v0.27.100 起嵌套由 error 降为 warning）。
+        nested_nodes = 被忽略的嵌套 .screen 节点（上层在 warnings 里点名列出，不许静默）。
+        旧版 _find_screen() 只取第一个 .screen 就 return，多屏设计稿因此被静默压成一页
+        （2026-09-21 修：页数 = 屏数，一屏不许丢）。
+        """
+        screens, nested = [], []
+
+        def walk(node, inside):
+            if node.tag == 'div' and 'screen' in _classes(node.attrs):
+                if inside:
+                    nested.append(node)
+                else:
+                    screens.append(node)
+                    inside = True
+            for ch in node.children:
+                walk(ch, inside)
+
+        walk(root, False)
+        return screens, nested
+
+    @classmethod
+    def _slidewindow_dicts(cls, d, out=None, recursive=True):
+        """取 slidewindow 控件 dict（recursive=True 时递归到嵌套 window 内）。
+
+        单屏旧路径保持**不递归**（与改动前逐字段一致，不多出回填）；
+        多屏合成后 slidewindow 落在整屏 window 内，用 recursive=True 才不会漏回填 iconSize。
+        """
+        if out is None:
+            out = []
+        for key, val in d.items():
+            if not isinstance(val, dict) or '__' not in key:
+                continue
+            if key.startswith('slidewindow__'):
+                out.append((key, val))
+            if recursive:
+                cls._slidewindow_dicts(val, out, recursive)
+        return out
 
     # ---------- 遍历 ----------
     _CSS_EFFECT_PATTERNS = (
@@ -942,24 +1217,31 @@ class HtmlToJson:
         self._leaf(ctx, node, typ)
 
     # ---------- 根节点 ----------
-    def _open_screen(self, ctx, node):
+    def _screen_size(self, node):
+        """.screen 分辨率：res 参数 > data-res > data-width+data-height（.screen 上直接写宽高）
+        > style 里的 width/height > 默认 480x272。
+
+        （res 参数给了但不合法时保持默认 480x272，与旧版行为一致。）"""
         attrs = node.attrs
-        # 分辨率优先级：res 参数 > data-res > data-width+data-height（.screen 上直接写宽高）> 默认 480x272
         res = self.res or _attr(attrs, 'data-res')
         W, H = 480, 272
         if res:
             m = re.match(r'^\s*(\d+)\s*[xX]\s*(\d+)\s*$', str(res))
             if m:
-                W, H = int(m.group(1)), int(m.group(2))
-        else:
-            w_attr = parse_px(_attr(attrs, 'data-width'))
-            h_attr = parse_px(_attr(attrs, 'data-height'))
-            if w_attr and h_attr:
-                W, H = w_attr, h_attr
-            else:
-                style_pos = _style_pos(_attr(attrs, 'style') or '')
-                if style_pos.get('width') and style_pos.get('height'):
-                    W, H = style_pos['width'], style_pos['height']
+                return int(m.group(1)), int(m.group(2))
+            return W, H
+        w_attr = parse_px(_attr(attrs, 'data-width'))
+        h_attr = parse_px(_attr(attrs, 'data-height'))
+        if w_attr and h_attr:
+            return w_attr, h_attr
+        style_pos = _style_pos(_attr(attrs, 'style') or '')
+        if style_pos.get('width') and style_pos.get('height'):
+            return style_pos['width'], style_pos['height']
+        return W, H
+
+    def _open_screen(self, ctx, node):
+        attrs = node.attrs
+        W, H = self._screen_size(node)
         # 背景色：data-background 与 data-bg 互为别名；不写则透明（不设 backgroundColor，navibar/statusbar 校准）
         bg = to_dec(_attr(attrs, 'data-background'))
         if bg is None:
@@ -1008,8 +1290,13 @@ class HtmlToJson:
             c['hideTimeOut'] = hto
         # 纯色背景（WindowDrag 无背景图用 backgroundColor 6323852 实测）
         bgc = self._bg_color(attrs)
-        if bgc:
+        if bgc is not None:
             c['backgroundColor'] = bgc
+        c['__bg'] = bgc          # A6：子控件圆角外底色取「最近祖先」（__ 前缀键在收尾时被剥离）
+        # A5 修：data-visible 直通（容器初始隐藏；模态默认 visible=false，作者显式写则以其为准）
+        _dv = _bool_attr(attrs, 'data-visible')
+        if _dv is not None:
+            c['visible'] = _dv
         pic = _attr(attrs, 'data-pic')
         if pic:
             c['backgroundPic'] = pic if '/' in pic else 'images/' + pic
@@ -1029,6 +1316,7 @@ class HtmlToJson:
                     root_bg = (ctx.root or {}).get('backgroundColor')
                     if root_bg is not None:
                         c['backgroundColor'] = root_bg
+                        c['__bg'] = root_bg
                     ctx.warnings.append(
                         f'{cap}: box-shadow → 阴影图 {pos["width"]}x{pos["height"]}'
                         f'（含 {eff["pad"]}px 阴影外扩）；控件盒已外扩、子控件已补偿，无需手工调整')
@@ -1219,7 +1507,7 @@ class HtmlToJson:
     def _append_slideitem(self, ctx, node):
         """slidewindow 内的子 div.item → 追加一个图标项到 items（picTab 两态图 + text）。"""
         attrs = node.attrs
-        item = {'colorTab': {'color0': to_dec(_attr(attrs, 'data-color')) or 0xFFFFFF},
+        item = {'colorTab': {'color0': _color_explicit(attrs, 'data-color', 0xFFFFFF)},
                 'picTab': {}, 'text': ''}
         pic0 = _attr(attrs, 'data-pic') or _attr(attrs, 'data-pic0') or _attr(attrs, 'data-src')
         pic1 = _attr(attrs, 'data-pic1')
@@ -1241,7 +1529,7 @@ class HtmlToJson:
         attrs = node.attrs
         cap = self._caption(ctx, 'wave', attrs)
         info = {'caption': cap,
-                'penColor': to_dec(_attr(attrs, 'data-color')) or 0xFFFFFF,
+                'penColor': _color_explicit(attrs, 'data-color', 0xFFFFFF),
                 'penWidth': _num(_attr(attrs, 'data-pen-width'), 2),
                 'step': _num(_attr(attrs, 'data-step'), 10.0),
                 'style': _num(_attr(attrs, 'data-style'), 1),
@@ -1270,17 +1558,20 @@ class HtmlToJson:
         attrs = node.attrs
         cap = self._caption(ctx, typ, attrs)
         pos = self._pos(attrs)
-        text = _clean_text(node.text)
+        text = _clean_text(node.text, ctx, cap)
 
         # 在 listview 内 → subItem
         if ctx.stack and ctx.stack[-1].get('__listview'):
             # subItem 子项（UIlayoutDemo/listview.ftu 校准）：支持背景图（头像等图片子项）+ 对齐 + 字号/颜色
             # subItem v2（SampleUI subitem 19 键 100%）：补安全默认键；iconPosition/textPosition/backgroundPic 条件写
             # （引擎缺省 icon/text 区 = position/控件区，历史验证 OK；有 backgroundPic 时用 backgroundPic 显示）
+            # A3 修（2026-09-27）：subItem 也认 data-bg → bgColorTab（行内做「带底色的块」）
+            sbg = self._bg_color(attrs)
             si = {'alignment': ALIGN.get((_attr(attrs, 'data-align') or 'center').lower(), 37),
-                  'backgroundColor': -1, 'bgColorTab': {'color0': -1},
+                  'backgroundColor': -1,
+                  'bgColorTab': {'color0': (-1 if sbg is None else sbg)},
                   'bold': False, 'caption': cap,
-                  'colorTab': {'color0': to_dec(_attr(attrs, 'data-color')) or 0xEEF2F6},
+                  'colorTab': {'color0': _color_explicit(attrs, 'data-color', 0xEEF2F6)},
                   'fontFamily': 0,
                   'fontSize': self._font_size(attrs) or 16,
                   'id': ctx.nid('subitem'),
@@ -1313,6 +1604,10 @@ class HtmlToJson:
                         si['charsetTab'] = parsed
                 except Exception:
                     pass
+            # A5 修：data-visible 直通（subItem 初始隐藏）
+            _vis = _bool_attr(attrs, 'data-visible')
+            if _vis is not None:
+                si['visible'] = _vis
             ctx.stack[-1]['item']['subItem'].append(si)
             return
 
@@ -1324,9 +1619,9 @@ class HtmlToJson:
                   'bold': False, 'caption': cap, 'checked': False,
                   'fontSize': self._font_size(attrs) or 16,
                   'italic': False, 'touchable': True,
-                  'bgColorTab': {'color0': to_dec(_attr(attrs, 'data-bg')) or 0x9FA05F,
-                                 'color2': to_dec(_attr(attrs, 'data-bg2')) or 0x55736C},
-                  'colorTab': {'color0': to_dec(_attr(attrs, 'data-color')) or 0xEEF2F6},
+                  'bgColorTab': {'color0': _color_explicit(attrs, 'data-bg', 0x9FA05F),
+                                 'color2': _color_explicit(attrs, 'data-bg2', 0x55736C)},
+                  'colorTab': {'color0': _color_explicit(attrs, 'data-color', 0xEEF2F6)},
                   'id': ctx.nid('radiobutton'),
                   'position': pos,
                   'visible': True}
@@ -1348,13 +1643,20 @@ class HtmlToJson:
         if typ == 'textview':
             c = {'alignment': ALIGN.get((_attr(attrs, 'data-align') or 'left').lower(), 36),
                  'caption': cap,
-                 'colorTab': {'color0': to_dec(_attr(attrs, 'data-color')) or 0xEEF2F6},
+                 'colorTab': {'color0': _color_explicit(attrs, 'data-color', 0xEEF2F6)},
                  'fontSize': self._font_size(attrs) or 16,   # SampleUI textview fontSize 100% 必写（默认 16）
                  'id': ctx.nid('textview'),
                  'position': pos, 'touchable': False}
             bgc = self._bg_color(attrs)
-            if bgc:
+            if bgc is not None:
                 c['bgColorTab'] = {'color0': bgc}
+            # 静态底图 data-bgpic（v0.27.90）：textview 分支原**不读**该属性 → json 里没有
+            #   backgroundPic = 「弹窗白卡/药丸/图标压根没画出来」，只能靠案例侧反查 HTML 兜底。
+            #   现与 button/window/seekbar/circlebar 等分支同口径落地；有图同样去底色（透明角会透底色）。
+            bgp = _attr(attrs, 'data-bgpic') or _attr(attrs, 'data-background-pic')
+            if bgp and not str(bgp).startswith('#'):
+                c['backgroundPic'] = bgp if '/' in bgp else 'images/' + bgp
+                self._corner_bg(ctx, c, attrs, bgc, cap)   # A6：圆角外底色不再一律 pop
             if text:
                 c['text'] = text
             self._text_extra(c, attrs)
@@ -1363,11 +1665,11 @@ class HtmlToJson:
             if eff.get('use_emoji'):
                 # emoji 文本 → 图标 textview（清除文本，避免设备字库不支持）
                 c.pop('text', None)
-                c.pop('bgColorTab', None)
+                self._corner_bg(ctx, c, attrs, bgc, cap)
                 c['touchable'] = False
             if eff.get('backgroundPic'):
                 c['backgroundPic'] = eff['backgroundPic']
-                c.pop('bgColorTab', None)   # 有图不用底色（透明角图会透底色）
+                self._corner_bg(ctx, c, attrs, bgc, cap)   # A6：圆角外底色不再一律 pop
                 if eff.get('pad'):
                     _grow(pos, eff['pad'])   # 叶子无子控件：只外扩自身，保证图==控件尺寸
             if eff.get('imageanim'):
@@ -1403,11 +1705,11 @@ class HtmlToJson:
             bgc = self._bg_color(attrs)
             c = {'alignment': ALIGN.get((_attr(attrs, 'data-align') or 'center').lower(), 37),
                  'caption': cap,
-                 'colorTab': {'color0': to_dec(_attr(attrs, 'data-color')) or 0xEEF2F6},
+                 'colorTab': {'color0': _color_explicit(attrs, 'data-color', 0xEEF2F6)},
                  'id': ctx.nid('button'),
                  'position': pos, 'touchable': True}   # SampleUI button touchable 恒 true（沛哥：交互控件显式 true）
             if bgc or text:
-                c['bgColorTab'] = {'color0': bgc or 0x374457}
+                c['bgColorTab'] = {'color0': (bgc if bgc is not None else 0x374457)}
             fs = self._font_size(attrs)
             if fs:
                 c['fontSize'] = fs
@@ -1454,7 +1756,10 @@ class HtmlToJson:
                         if eff.get('pad'):
                             _grow(pos, eff['pad'])   # 叶子：只外扩自身，保证图==控件尺寸
             if 'picTab' in c or 'backgroundPic' in c:
-                c.pop('bgColorTab', None)   # 图片按钮不放底色（透明角会透出底色，图片叠色效果错乱）
+                # A6 修（2026-09-27）：有图控件的**圆角外四角**由 bgColorTab 决定，旧版一律 pop
+                #   → 四角取引擎缺省（窗口黑底），坐卡片上的圆角按钮/图标四角发黑（P4 报障）。
+                #   口径与工程侧 inject_rounded() 一致：data-bg 优先，否则取最近祖先容器底色。
+                self._corner_bg(ctx, c, attrs, bgc, cap)
             # 图标按钮 padding（Button1 demo）：data-icon-w/h 图标尺寸 + data-pad 间隙 → iconPosition
             if _attr(attrs, 'data-icon-w') or _attr(attrs, 'data-icon-h'):
                 cw, ch = pos.get('width', 100), pos.get('height', 40)
@@ -1466,11 +1771,11 @@ class HtmlToJson:
             self._text_extra(c, attrs)
         elif typ == 'edittext':
             c = {'alignment': 37, 'bold': False, 'caption': cap,   # SampleUI edittext 必写 bold（去 beepEnable，沛哥）
-                 'bgColorTab': {'color0': self._bg_color(attrs) or 0xFFFFFF},
-                 'colorTab': {'color0': to_dec(_attr(attrs, 'data-color')) or 0},
+                 'bgColorTab': {'color0': self._bg_or(attrs, 0xFFFFFF)},
+                 'colorTab': {'color0': _color_explicit(attrs, 'data-color', 0)},
                  'fontSize': self._font_size(attrs) or 16,   # SampleUI edittext fontSize 100% 必写（默认 16）
                  'hintTextColor': 0, 'id': ctx.nid('edittext'),
-                 'position': pos}
+                 'position': pos, 'touchable': True, 'visible': True}   # A4 修：漏写 touchable/visible → 输入框点不动、IME 不弹
             if str(_attr(attrs, 'data-num') or '').strip() in ('1', 'true'):
                 c['textType'] = 1
             else:
@@ -1482,9 +1787,9 @@ class HtmlToJson:
                     c['passwordChar'] = pc
             hint = _attr(attrs, 'data-hint')
             if hint:
-                c['hintText'] = _clean_text(hint)
-            hc = to_dec(_attr(attrs, 'data-hint-color'))
-            if hc:
+                c['hintText'] = _clean_text(hint, ctx, cap)
+            hc = _color_explicit(attrs, 'data-hint-color', None)
+            if hc is not None:
                 c['hintTextColor'] = hc
             c['text'] = text if text else ''   # SampleUI edittext 必写 text（空串合法）
             self._text_extra(c, attrs)
@@ -1535,10 +1840,10 @@ class HtmlToJson:
                  'bold': False, 'caption': cap, 'checked': False,
                  'fontSize': self._font_size(attrs) or 16,
                  'italic': False, 'touchable': True,
-                 'bgColorTab': {'color0': to_dec(_attr(attrs, 'data-bg')) or 0x607A84,
-                                'color2': to_dec(_attr(attrs, 'data-bg2')) or 0x55736C},
-                 'colorTab': {'color0': to_dec(_attr(attrs, 'data-color')) or 0xEEF2F6,
-                              'color2': to_dec(_attr(attrs, 'data-color2')) or 0xFFFFFF},
+                 'bgColorTab': {'color0': _color_explicit(attrs, 'data-bg', 0x607A84),
+                                'color2': _color_explicit(attrs, 'data-bg2', 0x55736C)},
+                 'colorTab': {'color0': _color_explicit(attrs, 'data-color', 0xEEF2F6),
+                              'color2': _color_explicit(attrs, 'data-color2', 0xFFFFFF)},
                  'iconPosition': {'left': 0, 'top': 0, 'width': iw, 'height': ih},
                  'id': ctx.nid('checkbox'),
                  'position': pos,
@@ -1551,7 +1856,7 @@ class HtmlToJson:
             if pic0:
                 c['picTab'] = {'pic0': pic0 if '/' in pic0 else 'images/' + pic0,
                                'pic2': (pic2 if '/' in pic2 else 'images/' + pic2) if pic2 else (pic0 if '/' in pic0 else 'images/' + pic0)}
-                c.pop('bgColorTab', None)  # 有图不用底色
+                self._corner_bg(ctx, c, attrs, self._bg_color(attrs), cap)   # A6
             # basedemo checkbox/radiobutton 均 100% 写 text → 恒写（空串合法）
             c['text'] = text if text else ''
             if str(_attr(attrs, 'data-checked') or '').strip() in ('1', 'true'):
@@ -1632,11 +1937,11 @@ class HtmlToJson:
             if beat is not None:
                 c['beat'] = str(beat).strip() in ('1', 'true')
             # clockColor 数字颜色（ScreensaverDemo 校准）；colorTab 兼容旧写法
-            col = to_dec(_attr(attrs, 'data-color')) or to_dec(_attr(attrs, 'data-clock-color'))
-            if col:
+            col = _color_explicit(attrs, ['data-color', 'data-clock-color'], None)
+            if col is not None:
                 c['clockColor'] = col
             bgc = self._bg_color(attrs)
-            if bgc:
+            if bgc is not None:
                 c['bgColorTab'] = {'color0': bgc}
         elif typ == 'slidetext':
             # 候选字滑动条（ImeDemo/UserIme 校准）：textBgColor 文字背景色，输入法候选词用
@@ -1645,11 +1950,11 @@ class HtmlToJson:
             fs = self._font_size(attrs)
             if fs:
                 c['fontSize'] = fs
-            tbg = to_dec(_attr(attrs, 'data-text-bg'))
-            if tbg:
+            tbg = _color_explicit(attrs, 'data-text-bg', None)
+            if tbg is not None:
                 c['textBgColor'] = tbg
             col = to_dec(_attr(attrs, 'data-color'))
-            if col:
+            if col is not None:
                 c['colorTab'] = {'color0': col}
             if text:
                 c['text'] = text
@@ -1729,7 +2034,7 @@ class HtmlToJson:
             if cs:
                 c['codeStr'] = cs
             bgc = to_dec(_attr(attrs, 'data-bg'))
-            if bgc:
+            if bgc is not None:
                 c['backgroundColor'] = bgc
         elif typ == 'videoview':
             # 视频播放（VideoViewDemo/VideoPlayerDemo 校准）：defaultVolume 默认音量 + loopPlayback 循环 + rotation 旋转
@@ -1749,7 +2054,7 @@ class HtmlToJson:
                 c['rotation'] = rot
         elif typ == 'icon':
             c = {'alignment': 36, 'caption': cap,
-                 'colorTab': {'color0': to_dec(_attr(attrs, 'data-color')) or 0xEEF2F6},
+                 'colorTab': {'color0': _color_explicit(attrs, 'data-color', 0xEEF2F6)},
                  'fontSize': self._font_size(attrs) or 16,
                  'id': ctx.nid('textview'), 'position': pos, 'touchable': False}
             pic = _attr(attrs, 'data-pic') or _attr(attrs, 'src')
@@ -1787,6 +2092,10 @@ class HtmlToJson:
                  'id': ctx.nid('textview'), 'position': pos, 'touchable': False}
             typ = 'textview'
 
+        # A5 修（2026-09-27）：data-visible 直通 visible（HTML 侧「初始隐藏」的唯一口）
+        _vis = _bool_attr(attrs, 'data-visible')
+        if _vis is not None:
+            c['visible'] = _vis
         ctx.add(typ, c)
 
     # ---------- 辅助 ----------
@@ -1848,6 +2157,49 @@ class HtmlToJson:
                 c = to_dec(m.group(1).strip())
         return c
 
+    def _bg_or(self, attrs, default):
+        """背景色缺省值（A2 修）：data-bg 写纯黑(#000000) 也是 0，不能被 `or` 吞掉。"""
+        c = self._bg_color(attrs)
+        return default if c is None else c
+
+    def _ancestor_bg(self, ctx):
+        """最近祖先底色（圆角外底色用，A6）：容器打开时记在 __bg；都没有则回退页面底色。"""
+        for v in reversed(list(ctx.stack)):
+            if not isinstance(v, dict) or v.get('__listview'):
+                break
+            b = v.get('__bg')
+            if b is not None:
+                return b
+        root = ctx.root or {}
+        return root.get('backgroundColor', None)
+
+    def _corner_bg(self, ctx, c, attrs, given, cap=''):
+        """有图控件的**圆角外底色**归属（A6 修，2026-09-27）。
+
+        有图控件的四角透出的是 `bgColorTab`；旧版「有图一律 pop(bgColorTab)」
+        → 四角取引擎缺省（窗口黑底）→ 坐在卡片上的圆角按钮/图标四角发黑
+        （P4 报障「图标角落都是黑的」，真机逐点：四角 (0,0,0) / 卡片 (28,28,30)）。
+        口径与工程侧 inject_rounded() 一致：
+          ① 作者显式写 data-bg/data-background/style.background → 用它（最高优先）；
+          ② 没写 → 取**最近祖先容器底色**；
+          ③ 都没有 → 保持 pop（退回引擎缺省），并提示补 data-bg。
+        注意：bgColorTab 只管最外 1px；圆角里侧 4~5px 是图里像素，补色救不回来。
+        """
+        if given is not None:
+            c['bgColorTab'] = {'color0': given}
+            return
+        anc = self._ancestor_bg(ctx)
+        if anc is not None:
+            c['bgColorTab'] = {'color0': anc}
+            ctx.warn('%s：有图控件未写 data-bg，圆角外底色取最近祖先底色 0x%06X'
+                     '（A6：四角由 bgColorTab 决定，不写会露窗口黑底）' % (cap or '控件', anc),
+                     key='corner:%s' % (cap or '?'))
+            return
+        c.pop('bgColorTab', None)
+        ctx.warn('%s：有图控件既无 data-bg 也无祖先底色 → 圆角外四角按引擎缺省渲染'
+                 '（坐卡片上会发黑）；请给该控件补 data-bg=容器色' % (cap or '控件'),
+                 key='corner-nobg:%s' % (cap or '?'))
+
     def _pos(self, attrs):
         style = _attr(attrs, 'style') or ''
         pos = _style_pos(style)
@@ -1900,7 +2252,8 @@ def _walk_ctrls(d, top=False, out=None):
 def _finalize_layout(data, warnings):
     """生成收尾规范（fix.log 规则前移内化，2026-09-03）：
     - FT-009：textview/button 宽高自动扩到最小尺寸公式（超容器则告警不扩）
-    - FT-006：顶层多个互斥全屏 window → 告警（页面级应拆多 Activity）
+    - FT-006：顶层多个互盖的整屏 window -> 告警，按 page-architecture-spec.md 口径
+      说清「同业务域就该这样放，只有跨业务域/独立返回栈/超大页面才拆新 ftu」（不误判为错误）
     原地修改 data，把需人工处理的问题追加到 warnings。
     """
     res = data.get('resolution') or {}
@@ -1964,7 +2317,12 @@ def _finalize_layout(data, warnings):
             nw = pos['width']  # 宽度让位人工处理；高度不足仍自动扩（不挤占水平空间）
         pos['width'], pos['height'] = nw, nh
 
-    # ---- FT-006 页面级多全屏 window（互斥页面应拆多 Activity，不堆单 json）----
+    # ---- FT-006 顶层多个互盖整屏 window（merge-windows 形态的提醒）----
+    # 口径来源：knowledge/devflow/page-architecture-spec.md §0/§2（两者文字互引用，禁止再漂移）。
+    # 钟工 2026-09-21 口径：缺省 = 一个 .screen = 一页 = 一个 Activity = 一个 json/ftu；
+    # 只有「同属一个 Activity 的多个整屏 window」才合成同一个 json（html2json --merge-windows）。
+    # v0.27.100 起：本告警出现在 merge-windows 产物里（同 ftu 多整屏 window 就该这么放，
+    # 但**不许**因此把跨业务域的多页硬塞进一个 ftu）。
     screen_area = rw * (res.get('height') or 0)
     top_wins = [(k, v) for k, v in _walk_ctrls(data, top=True)
                 if k.startswith('window__') and v.get('position')]
@@ -1983,68 +2341,151 @@ def _finalize_layout(data, warnings):
                     hits.append((pages[i][0], pages[j][0]))
         if hits:
             names = ' / '.join(sorted({k for pair in hits for k in pair}))
-            warnings.append(f'检测到页面级互斥全屏 Window（{names}）：页面级页面应拆多个 Activity '
-                            f'用 Intent 跳转（onUI_intent / openActivity），不要单 json 堆全屏 Window '
-                            f'做 visible 状态机；功能窗口内的局部内容才用 Window 嵌套')
+            warnings.append(
+                f'检测到多个互相盖住的整屏 Window（{names}）：按 knowledge/devflow/'
+                f'page-architecture-spec.md 的默认口径，**同一业务域**内的多页就该这么放'
+                f'（同一个 ftu 内叠多个整屏 window，首屏 visible:true、其余 visible:false，'
+                f'切换只走 showWnd()/hideWnd()：零切换成本、共享控件指针与状态）；'
+                f'**只有跨业务域 / 需独立生命周期与返回栈 / 超大页面**才拆成独立 ftu'
+                f'（新 Activity + openActivity() 跳转；html2json 缺省就是每屏一个 json /\n'
+                f'一个 ftu，这个多整屏 window 形态要用 --merge-windows 才是）。'
+                f'判据见该文档 §2 决策清单')
     return data
 
 
-def html2json(input_html, output_json=None, res=None, asset_dir=None):
-    """受限 HTML → json 布局。返回 {success, jsonPath, resolution, controls, warnings}。
+def html2json(input_html, output_json=None, res=None, asset_dir=None, merge_windows=False):
+    """受限 HTML -> json 布局（缺省：每屏一个 json）。
+
+    返回 {success, jsonPath, jsonPaths, jsonsProduced, screensDetected, pagesProduced, mode,
+          pages[], resolution, controls, warnings, ...}（失败时 success:false + error）。
+
+    多屏（HTML 内多个 div.screen）默认口径（钟工 2026-09-21 口径，见
+    knowledge/devflow/page-architecture-spec.md）：**一个 .screen = 一个页面 = 一个 Activity
+    = 一个独立 json（-> 一个独立 ftu）**；N 屏 -> N 个 json，文件名取 data-page
+    （缺省 page_k）；同屏内部的 window / dialog（弹窗）不是页，直接写在 .screen 里
+    （div.window / div.modal），工具**不会**把多个 .screen 合并成多窗口。
+
+    merge_windows=True（CLI --merge-windows）：N 屏合成同一个 json 内的 N 个整屏 window
+    （window__1..window__N 连续编号，首屏 visible:true、其余 visible:false，切页走
+    showWnd/hideWnd）—— **仅当 AI 判定这些屏同属一个 Activity（同 ftu 内整屏 window）**时用；
+    返回体 warnings 里回显「本次按 merge-windows 合成」。
+
+    **屏数核对**：screensDetected != pagesProduced 一律 success:false + error（不静默丢页）；
+    pages[] 逐页列出（页名 + 对应 json 路径；merge_windows 时多页指向同一个 json）。
+    controls = 控件总数（**含嵌套**，A7 修 2026-09-27；旧版只数根层）；
+    controlsTopLevel / controlsNested = 顶层与嵌套分项。
+
+    输出落点：output_json 写 .json = 具体文件；写成目录（不带 .json）= 该目录；省略 = html
+    同目录。单页时直接写 output_json 文件（与旧版一致）；多页时写 <目录>/<data-page>.json。
 
     asset_dir：CSS 效果（渐变/阴影/emoji/loading）自动转图输出目录；
     缺省自动定位到项目 resources/images/（json 引用 images/xxx.png 相对 resources 目录，与设备加载一致）：
-      - output_json 位于 <项目>/ui/ 下 → asset_dir = <项目>/resources/images/
-      - 其它位置 → 回退 json 同目录 images/ 并警告（提示手动挪图或显式传 asset_dir）
+      - output_json 位于 <项目>/ui/ 下 -> asset_dir = <项目>/resources/images/
+      - 其它位置 -> 回退 json 同目录 images/ 并警告（提示手动挪图或显式传 asset_dir）
     不传 output_json 且不传 asset_dir 时不做自动转图（纯布局转换）。"""
     if not os.path.isfile(input_html):
         return {'success': False, 'error': f'html 文件不存在: {input_html}'}
     with open(input_html, encoding='utf-8-sig') as f:
         text = f.read()
     warnings = []
+    # 输出落点：output_json 是 .json -> 具体文件；否则当目录；省略 -> html 同目录
+    out_file = None
+    if output_json:
+        if str(output_json).lower().endswith('.json'):
+            out_file = os.path.abspath(output_json)
+            out_dir = os.path.dirname(out_file)
+        else:
+            out_dir = os.path.abspath(output_json)
+    else:
+        out_dir = os.path.dirname(os.path.abspath(input_html))
     if asset_dir is None and output_json:
-        out_dir = os.path.dirname(os.path.abspath(output_json))
         if os.path.basename(out_dir) == 'ui':
-            # <项目>/ui/main.json → 图片输出到 <项目>/resources/images/
+            # <项目>/ui/main.json -> 图片输出到 <项目>/resources/images/
             asset_dir = os.path.join(os.path.dirname(out_dir), 'resources', 'images')
         else:
             asset_dir = os.path.join(out_dir, 'images')
             warnings.append('output_json 不在 <项目>/ui/ 目录下，自动转图输出到 json 同目录 images/；'
                             '建议把图片移到项目 resources/images/ 后 json 引用 images/xxx.png（相对 resources）')
     conv = HtmlToJson(res=res, asset_dir=asset_dir)
-    data, w2 = conv.convert(text)
+    pages, w2, meta = conv.convert(text, merge_windows=bool(merge_windows))
     warnings += w2
-    if data is None:
-        return {'success': False, 'error': '未找到 <div class="screen"> 根节点（受限 HTML 必须从 screen 容器开始）'}
-    _finalize_layout(data, warnings)  # 收尾规范：FT-009 最小尺寸 / FT-006 多全屏 window 告警
+    if meta is None:
+        return {'success': False, 'warnings': warnings, 'screensDetected': 0, 'pagesProduced': 0,
+                'error': '未找到 <div class="screen"> 根节点（受限 HTML 必须从 screen 容器开始）'}
+    if meta.get('error') or pages is None:
+        return {'success': False, 'warnings': warnings,
+                'screensDetected': meta.get('screensDetected'),
+                'pagesProduced': meta.get('pagesProduced'),
+                'mode': meta.get('mode'),
+                'error': meta.get('error')
+                         or '未找到 <div class="screen"> 根节点（受限 HTML 必须从 screen 容器开始）'}
+    # 收尾规范：FT-009 最小尺寸 / FT-006 多整屏 window 提醒（每个 json 单独过一遍）
+    for _pid, data in pages:
+        _finalize_layout(data, warnings)
 
-    if output_json:
-        os.makedirs(os.path.dirname(os.path.abspath(output_json)), exist_ok=True)
-        with open(output_json, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-
+    per_page = (meta['mode'] == 'per-screen')   # merge-windows 是同一个 json，不按页写文件
+    json_paths = []
+    if per_page:
+        for pid, data in pages:
+            jp = os.path.join(out_dir, pid + '.json')
+            os.makedirs(os.path.dirname(os.path.abspath(jp)), exist_ok=True)
+            with open(jp, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            json_paths.append(jp)
+        output_json = json_paths[0]    # jsonPath 指首页（全量清单看 jsonPaths / pages）
+    else:
+        target = out_file or (os.path.join(out_dir, pages[0][0] + '.json') if output_json else None)
+        if target:
+            os.makedirs(os.path.dirname(os.path.abspath(target)), exist_ok=True)
+            with open(target, 'w', encoding='utf-8') as f:
+                json.dump(pages[0][1], f, ensure_ascii=False, indent=2)
+            json_paths = [target]
+            output_json = target
+    data = pages[0][1]
     resv = data.get('resolution', {})
-    count = sum(1 for k, v in data.items() if isinstance(v, dict) and '__' in k)
-    return {'success': True, 'jsonPath': output_json,
+    # A7 修（2026-09-27）：**嵌套控件也计入**（旧版只数根层 → 50 控件页面报 controls:1，
+    #   键盘页/弹窗页的控件全部漏计；controls 现在是全量，另附顶层/嵌套分项）
+    top_cnt = sum(1 for k, v in data.items() if isinstance(v, dict) and '__' in k)
+    all_cnt = len(_walk_ctrls(data))
+    count = all_cnt
+    return {'success': True, 'jsonPath': output_json, 'jsonPaths': json_paths,
+            'jsonsProduced': len(json_paths),
+            'screensDetected': meta['screensDetected'],
+            'pagesProduced': meta['pagesProduced'],
+            'mode': meta['mode'],
+            'pages': [{'page': pid,
+                       'json': (json_paths[i] if per_page
+                                else (json_paths[0] if json_paths else None))}
+                      for i, (pid, _d) in enumerate(pages)],
             'resolution': f"{resv.get('width')}x{resv.get('height')}",
-            'controls': count, 'warnings': warnings,
+            'controls': count, 'controlsTopLevel': top_cnt,
+            'controlsNested': max(all_cnt - top_cnt, 0), 'warnings': warnings,
             'generatedAssets': conv.gen_count,
             'assetDir': asset_dir}
 
 
 if __name__ == '__main__':
     sys.stdout.reconfigure(encoding='utf-8')
-    args = [a for a in sys.argv[1:] if not a.startswith('--')]
+    argv = sys.argv[1:]
+    merge = '--merge-windows' in argv
+    dead = '--split-per-page' in argv      # v0.27.100 起就是缺省口径，退役
+    args = [a for a in argv if not a.startswith('--')]
     res = None
-    for a in sys.argv[1:]:
+    for a in argv:
         if a.startswith('--res='):
             res = a.split('=', 1)[1]
-    if len(args) < 1:
-        print('用法: python html2json.py <input.html> [output.json] [--res WxH]')
-        sys.exit(1)
+    if len(args) < 1 or dead:
+        print('用法: python html2json.py <input.html> [output.json|输出目录] [--res WxH] [--merge-windows]')
+        print('  <input.html> 的每个 .screen = 一个页面 = 一个 Activity = 一个独立 json（缺省口径），')
+        print('  文件名取 data-page，输出目录 = output 所写目录 / html 同目录；')
+        print('  --merge-windows：N 屏合成同一 json 的 N 个整屏 window（首屏 visible:true 其余 false），')
+        print('    仅当这些屏同属一个 Activity 时才用；同屏内 window/dialog 直接写在 .screen 里。')
+        if dead:
+            print('  [X] --split-per-page 已退役（v0.27.100）：每屏一个 json 就是现在的缺省口径，去掉该参数即可。')
+        sys.exit(2 if dead else 1)
     src = args[0]
     dst = args[1] if len(args) > 1 else os.path.splitext(src)[0] + '.json'
-    r = html2json(src, dst, res=res)
+    r = html2json(src, dst, res=res, merge_windows=merge)
     if not r['success']:
         print('[X]', r['error'])
         sys.exit(1)

@@ -20,7 +20,7 @@
   7. 双份 ui_tools 副本 sha256 一致（tools/ui_tools/ ↔ tools/FlyThings_mcp_open/ui_tools/）
   8. 隐私/路径泄露扫描：本机绝对路径 / 内网真机 IP / DESKTOP 主机名 / 真实 accessKey
      （v0.27.77 起只扫「可能被发布的内容」= git 的已跟踪 + 未忽略新文件；
-      `.fun/` 这类 .gitignore 忽略的构建产物（含本机绝对路径）不再误报；无 git 时回退全量扫）
+      `.fsc/`/`.fun/` 这类 .gitignore 忽略的构建产物（含本机绝对路径）不再误报；无 git 时回退全量扫）
   9. 静默 except lint（调用 scripts/lint_silent_except.py，v0.27.32 起单一实现）
  10. 意图闸门 catalog 参数漂移（调 scripts/gen_gate_catalog.py --check）
 退出码：0 = 全通过；1 = 有 FAIL。
@@ -73,7 +73,7 @@ def _scan_files():
     """待扫描文件清单 [(相对路径, 绝对路径)]
 
     v0.27.77：优先用 git 的「已跟踪 + 未忽略的新文件」清单（`git ls-files -z --cached
-    --others --exclude-standard`）= **可能被发布的内容**；否则 `.fun/` 这类构建产物
+    --others --exclude-standard`）= **可能被发布的内容**；否则 `.fsc/`/`.fun/` 这类构建产物
     （.gitignore 已忽略，却带本机绝对路径/CMakeCache 主机信息）会把隐私扫描一路扫红。
     git 不可用（无 git / 非仓库）时回退到 os.walk 全量扫描（保守，不漏）。
     """
@@ -214,7 +214,8 @@ def main():
         cnt = cat.get('count', len(cat.get('ops', [])))
         check(cnt == len(names), 'gate catalog ops count', '%s vs %d (regenerate: python scripts/gen_gate_catalog.py)' % (cnt, len(names)))
     else:
-        check(False, 'gate catalog.json exists', catp)
+        check(True, 'gate catalog.json (未分发 → skip)',
+              '%s 不存在；闸门不在本仓库内，跳过 count 校验（仅提示）' % catp)
 
     # ---- 7) 双份 ui_tools 副本一致性（v0.27.31）
     twin = os.path.join(os.path.dirname(BASE), 'ui_tools')
@@ -235,7 +236,8 @@ def main():
         check(not fdiff, 'ui_tools dual copy hash sync',
               ','.join(fdiff) if fdiff else 'both copies identical')
     else:
-        check(False, 'ui_tools dual copy hash sync', 'missing dir: %s' % twin)
+        check(True, 'ui_tools dual copy hash sync (副本不在本机 → skip)',
+              'missing dir: %s（发布前的双份同步检查需要该副本目录，缺失不算失败）' % twin)
 
     # ---- 8) 隐私 / 路径泄露（v0.27.31）
     leaks = scan_leaks()

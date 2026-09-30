@@ -134,7 +134,10 @@ def stage_tool_count():
         cnt = json.loads(_read(gp)).get('count')
         check(cnt == len(names), 'gate catalog count', '%s vs %d' % (cnt, len(names)))
     else:
-        check(False, 'gate catalog.json exists', gp)
+        # v0.27.122：意图闸门目录不随 MCP 仓库分发（兄弟目录形态），缺失时降级为 skip + 提示，
+        # 不再误报红（审查报告 §2.1 ②）。存在但漂移仍会 FAIL（上面的 count 校验）。
+        check(True, 'gate catalog.json (未分发 → skip)',
+              '%s 不存在；闸门不在本仓库内，跳过 count 校验（仅提示）' % gp)
     mp = os.path.join(BASE, 'tools_manifest.json')
     if os.path.isfile(mp):
         d = json.loads(_read(mp))
@@ -306,6 +309,10 @@ def _expected_md_sets():
     known, expected = set(), set()
     if os.path.isdir(kb_dir):
         for r, _, fs in os.walk(kb_dir):
+            # 与 rebuild_index_local.py 同口径：inbox/_reports/_logs 不入索引
+            _parts = os.path.relpath(r, kb_dir).replace('\\', '/').split('/')
+            if any(p in ('inbox', '_reports', '_logs') for p in _parts):
+                continue
             for f in fs:
                 if f.endswith('.md'):
                     rel = os.path.relpath(os.path.join(r, f), kb_dir).replace('\\', '/')
@@ -446,10 +453,30 @@ def stage_delegated(skip_smoke, with_tests):
     rc, out = _run([sys.executable, os.path.join(SUB, 'gen_hardware_doc.py'), '--check'])
     check(rc == 0, 'delegated: gen_hardware_doc --check',
           'ok' if rc == 0 else out.strip().splitlines()[-1][:70])
+    # 知识库门禁（v0.27.125 起）：front-matter 合规 / kb_index 新鲜（源哈希）/ inbox 不进索引 /
+    # verified 必须有证据或显式 needs_evidence —— 「自动生长」没有门禁就会自动腐化。
+    rc, out = _run([sys.executable, os.path.join(SUB, 'check_kb.py')])
+    kb_tail = [l for l in out.strip().splitlines()
+               if l.startswith('[PASS]') or l.startswith('[FAIL]')]
+    check(rc == 0, 'delegated: check_kb.py (知识库门禁)',
+          (kb_tail[0] if kb_tail else 'rc=%d' % rc)[:70])
+    # P2：知识体检看板不许滞后（比对 kb_index 源哈希）——看板是决策依据，静默滞后会误导
+    rc, out = _run([sys.executable, os.path.join(SUB, 'kb_health.py'), '--check'])
+    tail2 = [l for l in out.strip().splitlines()
+             if l.startswith('[PASS]') or l.startswith('[FAIL]')]
+    check(rc == 0, 'delegated: kb_health --check (看板新鲜度)',
+          (tail2[0] if tail2 else 'rc=%d' % rc)[:70])
     if not skip_smoke:
         rc, out = _run([sys.executable, os.path.join(SUB, 'smoke.py')])
         last = [l for l in out.strip().splitlines() if l.startswith('total=')]
         check(rc == 0, 'delegated: smoke.py', last[0] if last else 'rc=%d' % rc)
+    # 检索质量回归（v0.27.94 起进门禁）：16 条真实问法必须一次命中权威文档 + 11 条对照组防调参副作用。
+    # 无需向量模型也能跑（自动降级 BM25，实测同样 16/16），耗时 ~4s。
+    rc, out = _run([sys.executable, os.path.join(SUB, 'check_retrieval.py')])
+    last = [l for l in out.strip().splitlines()
+            if l.startswith('[PASS]') or l.startswith('[FAIL]')]
+    check(rc == 0, 'delegated: check_retrieval.py',
+          (last[0] if last else 'rc=%d' % rc)[:70])
     if with_tests:
         rc, out = _run([sys.executable, '-m', 'unittest', 'discover', '-s', 'tests', '-q'])
         tail = [l for l in out.strip().splitlines() if l.strip()][-1:]

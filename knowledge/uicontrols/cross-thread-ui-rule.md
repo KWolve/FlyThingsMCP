@@ -1,4 +1,21 @@
+---
+id: uicontrols-cross-thread-ui-rule
+title: 跨线程操作 UI 规则（沛哥 2026-09-07 确认）
+category: uicontrols
+status: review
+confidence: manual
+verified_at: 2026-09-29
+stale_days: 180
+origin: total
+source: 2026-09-29 front-matter 迁移（P1：先显式登记"待补可执行判据"）
+needs_evidence: true
+platforms: []
+tags: []
+evidence: []
+---
 # 跨线程操作 UI 规则（沛哥 2026-09-07 确认）
+
+> 检索导引：问「子线程能不能直接 setText / 工作线程刷 UI 要不要 post·handler / 跨线程操作控件安全吗 / UI 回调里 sleep 等资源释放行不行」→ 本文。
 
 ## 铁律
 **所有控件都支持跨线程操作**：子线程/工作线程里可直接调用 setText/setVisible/setProgress/setBackgroundPic 等任意控件接口，FlyThings UI 框架内部会处理线程同步动作，**无需 handler/post 包装**（ThreadDemo-New 实测：MyThread::threadLoop 里直接 mTextView2Ptr->setText）。

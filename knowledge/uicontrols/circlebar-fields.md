@@ -1,5 +1,21 @@
+---
+id: uicontrols-circlebar-fields
+title: CircleBar 圆形进度条控件 JSON 字段规范
+category: uicontrols
+status: review
+confidence: manual
+verified_at: 2026-09-29
+stale_days: 180
+origin: total
+source: 2026-09-29 front-matter 迁移（P1：先显式登记"待补可执行判据"）
+needs_evidence: true
+platforms: []
+tags: [2026-09-07 git, 0 SDK 头文件校准, h 源码]
+evidence: []
+---
 # CircleBar 圆形进度条控件 JSON 字段规范
 
+> 检索导引：问「圆形进度条怎么做 / 圆环仪表·调温调光旋钮 / CircleBar 字段 / progressPic 扇形裁剪 / textType 与 unit / touchRange」→ 本文。
 > 2026-09-07 git.com 全库学习 + basedemo/CircleBarDemo-New + f133 easyui 2.9.0 SDK 头文件校准（fui unpack 实测字段 + ZKCircleBar.h 源码）。
 
 ## 核心铁律

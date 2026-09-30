@@ -1,5 +1,21 @@
+---
+id: uicontrols-pagewindow-fields
+title: PageWindow 多页窗口控件 JSON 字段规范
+category: uicontrols
+status: review
+confidence: manual
+verified_at: 2026-09-29
+stale_days: 180
+origin: total
+source: 2026-09-29 front-matter 迁移（P1：先显式登记"待补可执行判据"）
+needs_evidence: true
+platforms: []
+tags: [0 SDK, zk_pagewindow, 实测, 引导页, 分类页签内容区]
+evidence: []
+---
 # PageWindow 多页窗口控件 JSON 字段规范
 
+> 检索导引：问「多页窗口怎么做 / 左右滑动切页容器 / PageWindow 字段 / turnToNextPage 翻页 / 页变更回调 / 和 slidewindow·scrollwindow 区别」→ 本文。
 > 2026-09-07 basedemo/PageWindowDemo-New + f133 easyui 2.9.0 SDK（zk_pagewindow）实测。
 > 场景：同一区域多页内容左右滑动切换（引导页、分类页签内容区）。
 

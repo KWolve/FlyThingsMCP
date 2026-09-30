@@ -1,5 +1,21 @@
+---
+id: devflow-deploy-scene-map
+title: 部署/调试场景 → 工具动作映射（禁止自造部署命令）
+category: devflow
+status: review
+confidence: manual
+verified_at: 2026-09-29
+stale_days: 180
+origin: total
+source: 2026-09-29 front-matter 迁移（P1：先显式登记"待补可执行判据"）
+needs_evidence: true
+platforms: []
+tags: [内部 fun launch, deploy_debug, sh, sh 之类的额外部署脚本, AI 在任意客户端里收到, 调试, 全量推送, 部署, 类请求时, 必须调用 MCP 工具]
+evidence: []
+---
 # 部署/调试场景 → 工具动作映射（禁止自造部署命令）
 
+> 检索导引：问「调试/部署/全量推送/跑一下该调哪个工具 / 有没有 deploy_debug.sh / 固化升级算不算调试」→ 本文（用户话语→唯一动作映射）；固化出包见 `devflow/upgrade-pack-image.md`。
 > 铁律：FlyThings 全量部署/推送的唯一入口是 **`flythings_build_ui_flow`（内部 fun launch）**，
 > **不存在任何 `tools/deploy_debug.sh` / deploy_debug.sh 之类的额外部署脚本**。
 > AI 在任意客户端里收到「调试/全量推送/部署」类请求时，必须调用 MCP 工具，禁止自创 shell 脚本或命令路径。
@@ -20,6 +36,15 @@
 
 ⚠️ 没有「增量推送 vs 全量推送」两种模式：**fun launch 本身就是全量推送**（程序+资源+ftu 一起部署），
 不需要 adb push 单文件、不需要 kill zkgui、不需要中间脚本。
+
+> **应用侧重启应用进程时的姿势**（仅限脚本/示例要自己重启应用的场合，**不是**正常部署流程）：
+> **走 setprop 让 init 控制，不 kill 程序** —— 应用由类 init 服务托管（`/etc/init.rc`:
+> `service zkswe /bin/zkgui`），控制程序 = `setprop ctl.restart zkswe`（厂商 `fun launch`
+> 内部也是 `ctl.restart`，不用 kill）。MCP 侧单一实现 `adb_tools.restart_app()`
+> （setprop → 轮询等新 pid；`kill` 仅在 `allow_kill=True` 时才作兜底）。
+> ⚠️ 历史坑：早期临时脚本/示例大量 `kill -9 zkgui` / `busybox killall zkgui`，
+> 反复 kill 之后现场出现过「触摸注入不响应」「整板掉网」→ 现在统一口径：**不 kill**。
+> 口径与背景见 `device-deploy-budget.md` §5。
 
 ## ⚠️ 反例：固化升级**不是**本工具（另一条唯一入口）
 

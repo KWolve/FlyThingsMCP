@@ -244,5 +244,112 @@ class TestVerifyAssetsSemantics(unittest.TestCase):
                             '0 页时必须有 warning，不能静默 ok')
 
 
+class TestTextViewBgPic(unittest.TestCase):
+    """`div.text` 上的 `data-bgpic` 必须落成该节点的 backgroundPic（v0.27.90）。
+
+    为什么钉死（2026-09-17 真机定位，案例 projects/translate/tdesign-miniprogram）：
+    textview 分支原**不读** data-bgpic → json 里没有 backgroundPic（弹窗白卡/药丸/图标
+    在真机上压根没画出来），案例只能用 patch_json 反查 HTML 兜底。
+    同时钉住「反例」：无 bgpic 的 text 产出不变（不许顺手给所有 textview 塞 backgroundPic）。
+    """
+
+    def setUp(self):
+        self.tmp = U.project()
+        self.html = os.path.join(self.tmp, 'ui', 'main.html')
+        self.out_json = os.path.join(self.tmp, 'ui', 'main.json')
+
+    def tearDown(self):
+        U.cleanup(self.tmp)
+
+    def _convert(self, body):
+        U.write(self.html, '<div class="screen" data-res="480x272">\n%s\n</div>\n' % body)
+        r = U.jcall('flythings_html_to_json',
+                    {'input_html': self.html, 'output_json': self.out_json, 'res': '480x272'})
+        self.assertTrue(r['ok'], r)
+        d = json.loads(io.open(self.out_json, encoding='utf-8').read())
+        return dict((v.get('caption'), v) for k, v in _walk(d))
+
+    def test_bgpic_lands_on_textview(self):
+        caps = self._convert(
+            '<div class="text" data-caption="CardA" data-x="10" data-y="10" data-w="60"'
+            ' data-h="40" data-bgpic="images/card_a.png"></div>')
+        self.assertEqual(caps['CardA'].get('backgroundPic'), 'images/card_a.png',
+                         'div.text 的 data-bgpic 又丢了（案例白卡不显示的老 bug）')
+
+    def test_bgpic_bare_name_gets_images_prefix(self):
+        caps = self._convert(
+            '<div class="text" data-caption="PillA" data-x="10" data-y="10" data-w="60"'
+            ' data-h="40" data-bgpic="pill_a.png"></div>')
+        self.assertEqual(caps['PillA'].get('backgroundPic'), 'images/pill_a.png',
+                         '裸文件名必须补 images/ 前缀（与其它类型同口径）')
+
+    def test_text_without_bgpic_unchanged(self):
+        """反例：没有 data-bgpic 的 text 产出与改前一致（不许无条件塞 backgroundPic）。"""
+        caps = self._convert(
+            '<div class="text" data-caption="Plain" data-x="10" data-y="10" data-w="60"'
+            ' data-h="40">hello</div>\n'
+            '<div class="text" data-caption="BgcOnly" data-x="10" data-y="60" data-w="60"'
+            ' data-h="40" data-bg="#123456">hi</div>')
+        self.assertNotIn('backgroundPic', caps['Plain'], '无 bgpic 的 text 被塞了底图')
+        self.assertNotIn('backgroundPic', caps['BgcOnly'], '只有 data-bg（底色）不该出底图')
+        self.assertEqual(caps['BgcOnly'].get('bgColorTab'), {'color0': 0x123456},
+                         'data-bg 仍要落成 bgColorTab')
+
+    def test_bgpic_wins_over_bg_color(self):
+        """A6（2026-09-27）口径：有图控件的 `bgColorTab` 不再是「控件底色」而是**圆角外底色**——
+
+        ① 作者显式写 `data-bg` → 用它（四角透出的是这个色，不再是引擎缺省黑底）；
+        ② 没写 data-bg、也没祖先底色 → 保持 pop（退引擎缺省，与旧行为一致）；
+        ③ 没写 data-bg、但坐在有色 window 里 → 取**最近祖先容器底色**。
+        （旧断言「有图必不留 bgColorTab」正是 P4「图标角落都是黑的」的根因，已废）
+        """
+        caps = self._convert(
+            '<div class="text" data-caption="Both" data-x="10" data-y="10" data-w="60"'
+            ' data-h="40" data-bg="#123456" data-bgpic="images/both.png">x</div>')
+        self.assertEqual(caps['Both'].get('backgroundPic'), 'images/both.png')
+        self.assertEqual(caps['Both'].get('bgColorTab'), {'color0': 0x123456},
+                         '显式 data-bg 必须作为圆角外底色留下（A6）')
+
+        caps = self._convert(
+            '<div class="text" data-caption="NoBg" data-x="10" data-y="10" data-w="60"'
+            ' data-h="40" data-bgpic="images/nobg.png">x</div>')
+        self.assertNotIn('bgColorTab', caps['NoBg'],
+                         '既无 data-bg 也无祖先底色 → 保持 pop（与旧行为一致）')
+
+        caps = self._convert(
+            '<div class="window card" data-x="0" data-y="0" data-w="200" data-h="120"'
+            ' data-bg="#1C1C1E">'
+            '<div class="text" data-caption="InCard" data-x="10" data-y="10" data-w="60"'
+            ' data-h="40" data-bgpic="images/incard.png">y</div></div>')
+        self.assertEqual(caps['InCard'].get('bgColorTab'), {'color0': 0x1C1C1E},
+                         '无 data-bg 的有图控件要取最近祖先容器底色（A6 ③）')
+
+    @unittest.skipUnless(HAS_PIL, 'needs Pillow')
+    def test_bgpic_text_image_must_be_1to1(self):
+        """新落地的 backgroundPic 直接进「图尺寸 == 控件盒」核对（铁律 #11）：
+        60x40 的图配 60x40 盒 → ok；盒被抬到 46（图没重出）→ 立刻 FAIL。"""
+        body = ('<div class="text" data-caption="CardB" data-x="10" data-y="10" data-w="60"'
+                ' data-h="40" data-bgpic="images/card_b.png"></div>')
+        self._convert(body)
+        png = os.path.join(self.tmp, 'resources', 'images', 'card_b.png')
+        Image.new('RGBA', (60, 40), (255, 255, 255, 255)).save(png)
+        r = U.jcall('flythings_verify_assets', {'project_root': self.tmp})
+        self.assertEqual(r['mismatch'], [], r)
+        Image.new('RGBA', (60, 46), (255, 255, 255, 255)).save(png)   # 盒被抬高、图没重出
+        r = U.jcall('flythings_verify_assets', {'project_root': self.tmp})
+        self.assertFalse(r['ok'], '自动生成图与控件盒不等必须 FAIL')
+        self.assertEqual(len(r['mismatch']), 1, r)
+
+
+def _walk(node, out=None):
+    if out is None:
+        out = []
+    for k, v in node.items():
+        if isinstance(v, dict) and '__' in k:
+            out.append((k, v))
+            _walk(v, out)
+    return out
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

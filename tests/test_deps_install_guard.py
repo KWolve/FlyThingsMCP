@@ -44,7 +44,7 @@ def _mk(root, manifest, logic=None, with_ftu=True, lock=None, fun_json=None):
     if logic is not None:
         U.write(os.path.join(root, 'src', 'logic', 'mainLogic.cc'), logic)
     if with_ftu:
-        open(os.path.join(root, 'ui', 'main.ftu'), 'wb').write(b'ZKSR')   # 内容无关，存在即 UI 工程
+        open(os.path.join(root, 'ui', 'main.ftu'), 'wb').write(U.ftu_bytes() or b'ZKSR')   # 内容无关，存在即 UI 工程
     if lock:
         U.write(os.path.join(root, '.fun-lock.json'), json.dumps(lock, ensure_ascii=False))
     if fun_json:
@@ -165,22 +165,38 @@ class TestBuildFlowInstallGuard(unittest.TestCase):
     def tearDown(self):
         U.cleanup(self.tmp)
 
-    def _flow(self, manifest=MF_WITH_BASE):
-        """造一个「时间戳一致（不触发 pack）」的工程 → 跑 build_ui_flow。"""
+    def _flow(self, manifest=MF_WITH_BASE, font_check='auto'):
+        """造一个「时间戳一致（不触发 pack）」的工程 → 跑 build_ui_flow。
+
+        ⚠️ v0.27.84 起 `with_launch` 默认 True（build → 探测 → 推设备）。本文件盯的是
+        **install/依赖诊断**，与设备无关，所以显式传 `with_launch=False` 保持离线、
+        **不是**把断言放宽（新默认行为由 tests/test_adb_resolve.py 独立钉住）。
+        ⚠️ v0.27.86 起另有「字体体检 + 缺中文自动投递」（默认 auto）。本文件盯的仍是
+        **install/依赖诊断**，所以默认实例传 `font_check='off'` 隔离字体动作——**不是**放宽断言：
+        「默认自动投递」与「off 开关」由 tests/test_font_autoscan.py 独立钉住。
+        """
         _mk(self.tmp, manifest, with_ftu=True)
         page = os.path.join(self.tmp, 'ui', 'main.json')
         U.write(page, '{}')
         ftu = os.path.join(self.tmp, 'ui', 'main.ftu')
         # ftu 比 json 新 1 秒（<30s）→ 不 pack、也不误判「开发者改过 ftu」
         os.utime(ftu, (os.path.getmtime(page) + 1,) * 2)
-        return U.jcall('flythings_build_ui_flow', {'project_root': self.tmp})
+        return U.jcall('flythings_build_ui_flow',
+                       {'project_root': self.tmp, 'with_launch': False,
+                        'font_check': font_check})
 
     def test_clean_project_has_no_warnings(self):
-        """正例（模板新工程口径）：声明齐全 + 流程成功 → 顶层不许有 warnings。"""
+        """正例（模板新工程口径）：声明齐全 + 流程成功 → 顶层不许有 warnings。
+
+        ⚠️ v0.27.101 起只有一个例外：本工程无设计产物（无 design/、无 *.html）→
+        「设计先行」软闸门会附一条 `未检测到设计确认稿…` 的提示（见 test_design_first_gate.py）。
+        本用例的意图是「不许出现**流程噪音**」，因此先剔除该条再断言，不是放宽。
+        """
         with mock.patch.object(pt, '_run_fun', _fake_fun()):
-            r = self._flow(MF_WITH_BASE)
+            r = self._flow(MF_WITH_BASE, font_check='off')
         self.assertTrue(r['ok'], r)
-        self.assertFalse(r.get('warnings'), '正常路径出现噪音: %s' % r.get('warnings'))
+        noise = [w for w in (r.get('warnings') or []) if '未检测到设计确认稿' not in w]
+        self.assertFalse(noise, '正常路径出现噪音: %s' % noise)
         self.assertEqual([s for s in r['steps'] if s['step'] == 'check_framework_deps'], [],
                          '正常路径不该加体检 step')
 

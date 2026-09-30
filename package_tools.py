@@ -7,7 +7,8 @@ import platforms as _platforms  # 平台解析唯一来源（包生态键也在�
 REGISTRY_CANDIDATES = [
     # 本地包注册表（多目录合并：不同工具链/历史下载可能分散存放，全扫不漏包）
     os.environ.get('FLYTHINGS_REGISTRY', ''),      # 环境变量显式指定（最高优先）
-    os.path.join(os.path.expanduser('~'), '.fun', 'registry', 'public'),     # MCP 默认注册表（f133/z21 基础包）
+    os.path.join(os.path.expanduser('~'), '.fsc', 'registry', 'public'),     # 09-28 版 fun 的新家（fsc）
+    os.path.join(os.path.expanduser('~'), '.fun', 'registry', 'public'),     # 旧家（fun，历史包都在这里）
     os.path.join(os.path.expanduser('~'), '.fuse', 'registry', 'public'),    # 历史注册表（f133 全量 30+ 包：ntp/curl/mqtt-cxx 等）
     r'C:\zkswe\fun\registry\public',             # fun.exe 工具链自带注册表
 ]
@@ -390,7 +391,7 @@ BUILTIN_PKGS = {'easyui', 'log', 'zkhardware', 'zknet', 'zkmedia', 'zkmisc'}
 
 # ---------------- 框架基础依赖（v0.27.83）----------------
 # 包 ↔ 头文件判定表（只做有实测依据的，不臆造）：
-#   ① 证据（本机实测 2026-09-17）：`<项目>/.fun/<平台>/generated/event_{dispatcher,app}.{h,cpp}`
+#   ① 证据（本机实测 2026-09-17）：构建目录 `<项目>/{.fsc|.fun}/<平台>/generated/event_{dispatcher,app}.{h,cpp}`
 #      固定 `#include <base/functional.h>` / `base/base.h` / `base/defer.h` / `base/exception.h`
 #      —— 这些文件由 fun 自己生成，任何 UI 工程第一次 build 都会出现 → 缺包必 fatal error。
 #   ② ⚠️ `base/` 前缀**不是 base-utility 独占**（本机注册表实扫）：base-http-client→`base/http_*.h`、
@@ -437,12 +438,14 @@ def _declared_packages(root):
 def _resolved_packages(root):
     """已**解析**（= 真装上、include 路径会进 CMake）的包集合 + 证据文件。
 
-    来源是工具生成物（非手写）：`.fun-lock.json`（fun install 写的锁文件）+ `.deps.lock`（IDE 版本锁）。
+    来源是工具生成物（非手写）：`.fsc-lock.json`（09-28 起；旧名 `.fun-lock.json`，两代都读）+ `.deps.lock`（IDE 版本锁）。
     用途：避免「Manifest 没写、但被传递依赖装上了」的误报（实测：easyui 会带出 base-utility）。
     返回 (set, [证据文件名])。"""
     pkgs, ev = set(), []
-    fp = os.path.join(root, '.fun-lock.json')
-    if os.path.isfile(fp):
+    for _lock in ('.fsc-lock.json', '.fun-lock.json'):
+        fp = os.path.join(root, _lock)
+        if not os.path.isfile(fp):
+            continue
         try:
             data = json.loads(_read_text(fp))
         except Exception:
@@ -454,7 +457,7 @@ def _resolved_packages(root):
             for v in items.values():      # 条目里嵌的传递依赖
                 if isinstance(v, dict) and isinstance(v.get('dependencies'), dict):
                     pkgs.update(k for k in v['dependencies'] if isinstance(k, str))
-        ev.append('.fun-lock.json')
+        ev.append(_lock)
     dp = os.path.join(root, '.deps.lock')
     if os.path.isfile(dp):
         ids = re.findall(r'"id"\s*:\s*"([^"]+)"', _read_text(dp))
@@ -500,15 +503,17 @@ def _framework_include_evidence(root, dep):
     src = os.path.join(root, 'src')
     if os.path.isdir(src):
         roots.append(src)
-    fun_dir = os.path.join(root, '.fun')          # fun 生成物（generated/{event*,ui_main}.{h,cpp}）
-    if os.path.isdir(fun_dir):
-        try:
-            for plat in sorted(os.listdir(fun_dir)):
-                g = os.path.join(fun_dir, plat, 'generated')
-                if os.path.isdir(g):
-                    roots.append(g)
-        except Exception:
-            pass
+    # fun 生成物（generated/{event*,ui_main}.{h,cpp}）：.fsc（09-28 起）/ .fun（旧版）都扫
+    for _name in ('.fsc', '.fun'):
+        fun_dir = os.path.join(root, _name)
+        if os.path.isdir(fun_dir):
+            try:
+                for plat in sorted(os.listdir(fun_dir)):
+                    g = os.path.join(fun_dir, plat, 'generated')
+                    if os.path.isdir(g):
+                        roots.append(g)
+            except Exception:
+                pass
     out = []
     for r in roots:
         for base, _, files in os.walk(r):
@@ -581,10 +586,14 @@ def framework_dep_status(project_root, platform=''):
             'hint': (missing[0]['hint'] if missing else '')}
 
 
-def flythings_check_project_deps(project_root, platform='F133'):
+def flythings_check_project_deps(project_root, platform='F133', device='',
+                                 font_check='auto', font_tier='', font_apply=False):
     """扫描项目代码 include 的三方库，与 Manifest.xml 已声明依赖对比，返回缺失依赖。
     新建/交付项目前调用，避免"用了三方库但没声明"导致编译失败。
-    另含**框架基础依赖**体检（v0.27.83）：base 头文件（含 fun 生成的 generated/*.h）→ 必须有 base-utility。"""
+    另含**框架基础依赖**体检（v0.27.83）：base 头文件（含 fun 生成的 generated/*.h）→ 必须有 base-utility。
+    另含**字体体检**（v0.27.86，`fontCheck` 字段）：缺中文字库 / prefs 引用断链 → `fontIssues` 给结论与
+    一键修复命令；默认**只报不投**（`font_apply=True` 才真投递；`flythings_build_ui_flow` 默认自动投递）。
+    传 `device='<serial|IP:5555>'` 时额外扫设备字体；不传则只做工程侧检查（不碰 adb）。"""
     root = os.path.abspath(project_root)
     src = os.path.join(root, 'src')
     if not os.path.isdir(src):
@@ -625,11 +634,62 @@ def flythings_check_project_deps(project_root, platform='F133'):
                         'kind': 'framework', 'declared': d['declared'], 'resolved': d['resolved'],
                         'evidence': d['evidence'], 'msg': d['msg'], 'hint': d['hint'],
                         'fix': d['fix']})
+    # 6. 字体体检（v0.27.86）：缺中文字库 / prefs 字体引用断链 → fontCheck + fontIssues
+    #    默认只报不投（font_apply=True 才投递）→ 本 op 默认仍是「只读体检」；
+    #    传 device= 才扫设备字体（不传就不碰 adb，离线可跑）。
+    font, font_issues = {}, []
+    try:
+        import font_tools as ftools
+        st = ftools.font_preflight(root, platform, device=device, font_check=font_check,
+                                   font_tier=font_tier, apply=bool(font_apply),
+                                   allow_device=bool(device))
+        font = ftools.compact(st)
+        font['warnings'] = st.get('warnings') or []
+        if st.get('info'):
+            font['info'] = st['info']
+        if st.get('missingChinese'):
+            tier = st.get('tier') or 'common'
+            fix = ftools.repair_command(root, tier)
+            where = ('设备侧扫描' if st.get('deviceScanned')
+                     else '工程侧检查（未连设备）')
+            font['repair'] = fix
+            # 硬判据（v0.27.87）：报出 GB2312 一级覆盖率（不看体积猜）
+            cov = ''
+            if st.get('source') == 'cmap':
+                cov = '，GB2312 一级覆盖率 %s%%（阈值 90%% 算 ok）' % st.get('cmapCoverageGB2312L1')
+            font_issues.append({
+                'kind': 'font', 'verdict': st.get('verdict'),
+                'missingChinese': True, 'maxFontBytes': st.get('maxFontBytes'),
+                'advisedTier': tier,
+                'source': st.get('source'),
+                'cmapCoverageGB2312L1': st.get('cmapCoverageGB2312L1'),
+                'checkedFont': st.get('checkedFont'),
+                'delivered': st.get('delivered'),
+                'msg': ('缺中文字库（%s）：判定=%s%s，最大字体 %s KB → 界面汉字会变方块；默认投 %s 档'
+                        % (where, st.get('verdict'), cov, st.get('maxFontKB'), tier)),
+                'hint': ('直接跑 flythings_build_ui_flow（默认自动投递 common）或本 op 传 '
+                         'font_apply=True；命令行：' + fix)})
+        elif st.get('enabled') and st.get('verdict') in ('partial_cjk', 'project_partial_cjk'):
+            font_issues.append({'kind': 'font', 'verdict': st.get('verdict'),
+                                'missingChinese': False,
+                                'maxFontBytes': st.get('maxFontBytes'),
+                                'advisedTier': 'full',
+                                'msg': '字库只到「常用字」级别（%s KB）：有生僻字需求换 full 档'
+                                       % st.get('maxFontKB'),
+                                'hint': "flythings_build_ui_flow(font_tier='full')（生僻字）"
+                                        "或 font_tier='multi'（多语言/日韩）"})
+    except Exception as e:                      # 字体体检出错不影响依赖体检结果
+        font = {'enabled': False,
+                'error': '字体体检异常: %s: %s' % (type(e).__name__, e)}
+        font_issues.append({'kind': 'font', 'enabled': False,
+                            'msg': font['error'], 'hint': '见 font_tools.py'})
     return {'success': True, 'projectRoot': root, 'platform': platform,
             'declaredPackages': sorted(declared),
             'detectedIncludes': sorted(detected.keys()),
             'missingDependencies': missing,
-            'frameworkDeps': fw.get('deps', [])}
+            'frameworkDeps': fw.get('deps', []),
+            'fontCheck': font,
+            'fontIssues': font_issues}
 
 
 def flythings_list_packages(platform=None):
@@ -643,7 +703,7 @@ def flythings_list_packages(platform=None):
         pkgs = reg.get(np_, {})
         if pkgs:
             items = [{'name': n, 'version': v[-1] if v else None,
-                      'description': PKG_DESC.get(n, '')}
+                      'description': PKG_DESC.get(n, ''), 'hasCard': _has_card(n)}
                      for n, v in sorted(pkgs.items())]
         else:
             # 无本地缓存：用离线目录（全平台快照）
@@ -680,6 +740,8 @@ def flythings_query_package(package, platform='F133'):
     if local_versions:
         return {'success': True, 'package': package, 'platform': platform,
                 'description': PKG_DESC.get(package, ''),
+                'cardSummary': (package_card(package) or {}).get('summary') or None,
+                'hasCard': _has_card(package),
                 'versions': local_versions, 'source': 'local registry'}
     cv = _catalog_versions(package, np_)
     if cv:
@@ -689,6 +751,8 @@ def flythings_query_package(package, platform='F133'):
     online = _online_versions(package, np_)
     return {'success': True, 'package': package, 'platform': platform,
             'description': PKG_DESC.get(package, ''),
+            'cardSummary': (package_card(package) or {}).get('summary') or None,
+            'hasCard': _has_card(package),
             'versions': online, 'source': 'package.flythings.cn' if online else 'unknown'}
 
 
@@ -734,7 +798,8 @@ def flythings_get_package_api(package_id, platform='F133', version=None):
     versions = _pkg_versions(package_id, platform)
     v = version or (versions[0] if versions else None)  # versions 降序，[0] 为最新
     if not versions:
-        return {'success': False, 'error': f'平台 {platform} 未找到包 {package_id}'}
+        return {'success': False, 'error': f'平台 {platform} 未找到包 {package_id}',
+                'card': package_card(package_id)}
     inc = os.path.join(_pkg_dir(package_id, platform), v, 'include')
     classes = _parse_header_classes(inc) if os.path.isdir(inc) else []
     readme = _pkg_readme(package_id, platform, v)
@@ -750,7 +815,8 @@ def flythings_get_package_api(package_id, platform='F133', version=None):
     return {'success': True, 'package': package_id, 'version': v,
             'platform': platform,
             'headers': _pkg_headers(package_id, platform, v),
-            'classes': classes, 'examples': examples}
+            'classes': classes, 'examples': examples,
+            'card': package_card(package_id)}
 
 
 def flythings_resolve_dependencies(packages, platform='F133'):
@@ -962,3 +1028,55 @@ def flythings_add_package(project_root, package, version=None, platform=None, wi
     return {'success': True, 'package': pkg, 'version': v, 'platform': platform,
             'versionSource': 'local' if vers else 'catalog/online',
             'action': action, 'manifestPath': mf, 'install': install}
+
+# ==================== 仓库内置「包卡」（packages/<包>/package.yaml） ====================
+# 背景（2026-09-29 审查报告 P0①）：AI 通过工具只能看到 registry 的头文件/README，
+# 我们写的 11 张包卡（summary / api / usage_cpp / gotchas / verified_*）原先**取不到**。
+# 这里把包卡接进工具返回，registry 仍作兜底（包卡不存在时行为不变）。
+REPO_PACKAGES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'packages')
+_PACKAGE_CARDS = {}
+
+
+def _repo_card_path(pkg):
+    p = os.path.join(REPO_PACKAGES_DIR, str(pkg), 'package.yaml')
+    return p if os.path.isfile(p) else None
+
+
+def _load_yaml_file(path):
+    """优先 pyyaml；不可用时返回 None（调用方降级为「无包卡」）。"""
+    try:
+        import yaml  # noqa
+        with open(path, encoding='utf-8') as fp:
+            return yaml.safe_load(fp)
+    except Exception:
+        return None
+
+
+def package_card(pkg):
+    """仓库里的包卡（不存在/解析失败 → None）。带进程内缓存。"""
+    key = str(pkg)
+    if key in _PACKAGE_CARDS:
+        return _PACKAGE_CARDS[key]
+    path = _repo_card_path(key)
+    card = None
+    if path:
+        data = _load_yaml_file(path)
+        if isinstance(data, dict):
+            card = {k: data.get(k) for k in
+                    ('id', 'version', 'summary', 'entry', 'headers', 'api', 'deps',
+                     'usage_cpp', 'gotchas', 'see_also')}
+            card['platforms'] = data.get('platforms')
+            card['verified'] = {k: v for k, v in data.items()
+                                if isinstance(k, str) and k.startswith('verified')}
+            card['cardPath'] = 'packages/%s/package.yaml' % key
+            card['readmePath'] = 'packages/%s/README.md' % key
+    _PACKAGE_CARDS[key] = card
+    return card
+
+
+def _has_card(pkg):
+    return package_card(pkg) is not None
+
+
+def _cards_dir():
+    return REPO_PACKAGES_DIR

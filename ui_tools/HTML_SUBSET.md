@@ -124,12 +124,95 @@ iconfont class），转换器**自动生成 iconfont 风格矢量线框 PNG**（
 </div>
 ```
 
+## 多屏（多个 `.screen`）：一个 `.screen` = 一个页面 = 一个 Activity = 一个 json
+
+原型线框图/美化稿允许**一个 HTML 放多屏**（每屏一个并列 `div.screen`，`data-page` 区分，见
+`knowledge/devflow/prototype-flow.md` 的「分页落地清单（硬规则）」）。
+**缺省口径（钟工 2026-09-21）：一个 `.screen` = 一个页面 = 一个 Activity = 一个独立 json（-> 一个独立 ftu）；
+N 个 `.screen` 就产出 N 个 json。** 工具**不会**把多个 `.screen` 合成多窗口。
+**转换后 json 数必须等于屏数**，不少于。
+
+> 「哪些屏属于不同 Activity、哪些属于同一个 `.screen` 内部的 window/dialog」**由 AI 在设计阶段
+> （HTML 原型）判定**：不同 Activity 的屏 -> 各自一个 `.screen`（各自一个 json/ftu）；
+> 同一个 Activity 内部的弹窗/二级浮层 -> 写在该 `.screen` **里面**（`div.window` / `div.modal`），
+> 不另起一个 `.screen`。
+
+### 结构规范
+
+```html
+<div class="screen" data-page="home"   data-page-name="首页"   data-res="800x480" data-bg="#101418"> ... </div>
+<div class="screen" data-page="detail" data-page-name="详情页" data-res="800x480" data-bg="#101418"> ... </div>
+```
+
+- 每个 `.screen` = **一页**，必须**并列**（`.screen` 里不能再套 `.screen`；嵌套时按**最外层**算页、
+  内层容器被忽略，转换器给 warning 并点名，不静默）；
+- `data-page` = 页 id（缺省 `page_k`）：缺省口径下就是 **json 文件名**；`--merge-windows` 时作为该整屏 window 的 `caption`；**必须唯一**（重复 = 报错）；
+- 同一 `.screen` 内的 `div.window` / `div.modal`（弹窗）**不是页**：它们是这一页内部的显隐元素
+  （json 里就是该页内的 window 控件），不占页数、也不会被拆成第二个 json；
+- 屏内坐标 = 该屏内的绝对坐标（同单屏规则）；各屏分辨率应一致（以 `--res` / 首屏 `data-res` 为准）；
+- 多屏写法只为「一稿看全流程」，**产物形态由转换参数决定**（下面两种）。
+
+### 落地形态（二选一）
+
+| 形态 | 怎么转 | 产物 | 什么时候用 |
+|------|--------|------|------------|
+| **默认：每屏一个 json（独立 ftu / 独立 Activity）** | 直接转（不带参数） | **N 个 json**，文件名 = `<data-page>.json`（缺省 `page_k.json`），每份都是普通单屏 json（无整屏 window 包裹） | **常态**：每页一个 Activity 一个 ftu（`openActivity()` 跳转）；不同业务域、需独立返回栈、大页面一律走这条 |
+| **合并：同 json 多整屏 window** | `--merge-windows`（MCP：`merge_windows=true`） | **一个 json**：`window__1..window__N` 连续编号，首屏 `visible:true`、其余 `visible:false`，每个 window 的 `position` = 整屏，`caption` = `data-page`；屏内控件挂在对应 window 里（相对该窗口坐标） | **仅当 AI 判定这些屏同属一个 Activity**（同 ftu 内的多个整屏 window，代码里 `showWnd()/hideWnd()` 切页）；页签/设置二级页/遮挡页这类共享控件指针与状态的场景 |
+
+判据见 `knowledge/devflow/page-architecture-spec.md` §2 决策清单（缺省 = 每屏一个 json / 一个 Activity）。
+
+### 输出落点
+
+- 单页：写 `output_json` 指定的那个文件（与旧版一致）；
+- 多页（缺省口径）：写 `<输出目录>/<data-page>.json`；`output_json` 写 `.json` = 取它的所在目录，
+  写成目录（不带 `.json`）= 直接用它，省略 = html 同目录；
+- `--merge-windows`：只写一个 json（`output_json` 指定的文件；只给目录时用**首屏 data-page** 命名）。
+
+### 返回值与错误口径（不许静默丢页）
+
+返回体带 **`screensDetected`**（识别到几个 `.screen`）、**`pagesProduced`**（实际产出几页）、
+**`jsonsProduced`**（实际写出几个 json）与 **`pages[]`**（**逐页**列：页名 + 对应的 json 路径；
+`--merge-windows` 时多页指向同一个 json）：
+
+- `screensDetected == pagesProduced` = `success:true`；`warnings` 逐条列出「识别到的页」与每页落点
+  （缺省 = 每页自己的 json 文件名；`--merge-windows` = `第 k 屏 -> window__k`，并回显「本次按
+  merge-windows 合成」）；
+- **两者不等 = `success:false` + `error`**（`data-page` 重复、某屏转换失败等）。
+  这是硬闸门：**交付前必做「屏数核对」**（设计稿 N 屏 <-> 产出 N 页 = N 个 json），不过不许交付。
+
+### 最小 2 屏示例
+
+```html
+<!-- ===== PAGE: home 首页（主入口） ===== -->
+<div class="screen" data-page="home" data-page-name="首页" data-res="800x480" data-bg="#101418">
+  <div class="text" data-caption="TitleBar" data-x="0"  data-y="0"   data-w="800" data-h="48">首页</div>
+  <div class="btn"  data-caption="BtnGo"    data-x="40" data-y="120" data-w="320" data-h="80" data-goto="detail">去详情</div>
+  <!-- 这一页自己的弹窗：不是新页面，不占屏数 -->
+  <div class="modal" data-caption="ConfirmDlg" data-x="200" data-y="160" data-w="400" data-h="200" data-bg="#202830">
+    <div class="text" data-caption="DlgText" data-x="20" data-y="40" data-w="360" data-h="60">确认退出？</div>
+  </div>
+</div>
+<!-- ===== PAGE: detail 详情页 ===== -->
+<div class="screen" data-page="detail" data-page-name="详情页" data-res="800x480" data-bg="#101418">
+  <div class="text" data-caption="DetailTitle" data-x="0"  data-y="0"   data-w="800" data-h="48">详情</div>
+  <div class="btn"  data-caption="BtnBack"     data-x="40" data-y="380" data-w="200" data-h="80">返回</div>
+</div>
+```
+
+```bash
+# 缺省（推荐）：每屏一个 json -> home.json / detail.json（各自一个 ftu / Activity）
+python tools/ui_tools/html2json.py ui/wireframe.html ui/
+
+# 仅当这些屏同属一个 Activity 时：合成一个 json 的 N 个整屏 window
+python tools/ui_tools/html2json.py ui/wireframe.html ui/main.json --merge-windows
+```
+
 ## 元素/class → FlyThings 控件映射表
 
 | HTML（tag + class） | FlyThings 控件 | 说明 |
 |---|---|---|
 | `div.screen` | 根节点 | 必须；分辨率 data-res="WxH"（也支持 data-width/data-height 或 style 宽高），背景 data-bg / data-background（默认 #0E131A） |
-| `div.text` / `p` / `span` | ZKTextView | 字号 data-fs（也认 data-font-size/data-fontSize/内联 font-size）、文字色 data-color、背景 data-bg/data-background、对齐 data-align |
+| `div.text` / `p` / `span` | ZKTextView | 字号 data-fs（也认 data-font-size/data-fontSize/内联 font-size）、文字色 data-color、背景 data-bg/data-background、对齐 data-align；**底图 data-bgpic**（v0.27.90 起落成 backgroundPic，有图不再写底色） |
 | `div.btn` / `button` | ZKButton | data-bg 底色、data-fs；**图片按钮铁律**：有图（data-pic/data-pic0~4 多态图、data-bgpic 背景图）自动去底色（图片叠色效果错乱）；纯文字才用底色。data-pic0 正常/1 按下/2 选中/3 选中按下/4 无效；data-icon-w/h + data-pad 图标 padding |
 | `div.input` / `input` | ZKEditText | data-num="1" 数字键盘、data-hint 提示、data-hint-color 提示色、data-password="1" 密码掩码、data-bg 底色、预填文本=div 内容 |
 | `div.imageanim` / `div.anim` / `div.gif` | ZKImageAnim 动图 | data-src/data-play-file GIF 路径（自动加 image/ 前缀）、data-loop 循环次数（0=无限）、data-interval 帧间隔；生成 playFile 字段设备自动播放 |
@@ -187,7 +270,7 @@ iconfont class），转换器**自动生成 iconfont 风格矢量线框 PNG**（
 | `data-roll-speed` | pagewindow 滚动速度 | data-roll-speed="30" |
 | `data-checked` | checkbox 勾选 | data-checked="1" |
 | `data-pic0`~`data-pic4` | button 多态图（正常/按下/选中/选中按下/无效） | data-pic0="btn_normal.png" data-pic1="btn_pressed.png" |
-| `data-bgpic` | button 背景图（backgroundPic 单图） | data-bgpic="btn_bg.png" |
+| `data-bgpic` | 背景图（backgroundPic 单图）：button / textview（**v0.27.90 起**）/ window / seekbar / circlebar / diagram / pointer 等 | data-bgpic="btn_bg.png" |
 | `data-icon-w` / `data-icon-h` | checkbox/button 图标尺寸（缺省=控件高） | data-icon-w="48" |
 | `data-pad` | checkbox 图标与文字间隙（缺省 6px，自动算 textPosition） | data-pad="8" |
 | `data-color2` / `data-bg2` | checkbox 无图时选中态色 | data-color2="#FF0000" |
@@ -239,6 +322,33 @@ iconfont class），转换器**自动生成 iconfont 风格矢量线框 PNG**（
 </div>
 ```
 - ⚠️ 旧版本曾要求必须 class="subitem" 直挂、`.item` 包裹会被吞成单个空 subItem，已修复：现在两种写法都支持。
+- **subItem 也能带底色**（A3 修，2026-09-27）：`data-bg` → subItem 的 `bgColorTab.color0`（不写 = `-1`）；
+  但 subItem **仍不支持挂圆角九宫格图**（引擎侧限制，行内要做「带底色的块」用 `data-bg` 色块）。
+
+## 属性对照三表（直通 / 丢弃 / 默认值）—— A8 修（2026-09-27）
+
+> 完整版（含逐行备注与替代写法）：`knowledge/devflow/html-subset-quickref.md` §4.1。
+> 本节只收「改代码时要看」的部分；⚠️ 三个不静默的提醒：
+> 丢字符 / 有图控件无圆角外底色 / 文本最小宽超出容器——均会进返回体 `warnings[]`。
+
+| 类别 | 内容 | 与本文“属性速查”的关系 |
+|---|---|---|
+| **直通** | 写了就 1:1 落地（position/颜色/字号/picTab/backgroundPic/**visible**/charsetTab…） | 速查表的每一行都属此列 |
+| **丢弃** | `data-touchable`、emoji/黑名单字符、未知 class/style 声明、嵌套 `.screen` | 其中 emoji/黑名单字符会 `warn` 记账（A1） |
+| **默认值** | 不写时各字段取值（字号 16 / 文字色 `0xEEF2F6` / `touchable` 按类型 / 背景 `-1`…） | 铁律 9「字段全集显式化 v2」的取值依据 |
+
+### 2026-09-27 一轮修正（钟工转发 PocketGame 清单后核实并修）
+
+| # | 修正 | 代码位置 |
+|---|---|---|
+| A1 | 黑名单/emoji 丢字符 → 进 `warnings[]`（不再静默） | `_clean_text(ctx=…)` |
+| A2 | 纯黑 `#000000` 不再被当未设置（16 处 `or 默认值` → `_color_explicit()`） | `html2json.py` |
+| A3 | subItem 认 `data-bg` → `bgColorTab` | `_leaf()` subItem 分支 |
+| A4 | edittext 补 `touchable/visible`（原缺 → 输入框点不动、IME 不弹） | `_leaf()` edittext 分支 |
+| A5 | 支持 `data-visible` 直通 `visible`（控件/容器/subItem） | `_bool_attr()` |
+| A6 | 有图控件不再一律 pop 底色 → `data-bg > 祖先容器色 > 缺省+告警` | `_corner_bg()` |
+| A7 | `controls` 计数含嵌套（另给顶层/嵌套分项）；遍历脚本递归 + 绝对坐标 | `kb_tools.py` / `test_tools.py` |
+| A8 | 三表入库（本节）+ 上述 alert 统一进 `warnings[]` | 本文 + quickref §4.1 |
 
 ## 铁律（转换器自动处理，手写 HTML 时注意）
 1. **Z 序 = HTML 书写顺序**：后定义在上层。弹窗 modal 必须最后书写。
@@ -259,6 +369,11 @@ iconfont class），转换器**自动生成 iconfont 风格矢量线框 PNG**（
    seekbar 恒带 backgroundColor/thumb/touchable/visible；qrcode 恒带 touchable:true/padding:10/visible；videoview 按 SampleUI
    （touchable:true 无 beepEnable）；listview 恒带 touchable:true/hasScrollbar/backgroundColor 等。
    ⚠️ beepEnable 不强制（交互控件默认支持）；交互控件 touchable 显式 true，容器/纯显示 false。
+10. **多屏 = 一个 `.screen` 一页一个 json（`screensDetected` == `pagesProduced` == `jsonsProduced`）**：
+   缺省每屏一个 json（= 一个 Activity 一个 ftu）；只有**同属一个 Activity 的多个整屏 window** 才用
+   `--merge-windows` 合成一个 json。两者不等即 `success:false`；交付前必做「屏数核对」——
+   **设计稿 N 屏 <-> 产出 N 页（= N 个 json）**（详见上文「多屏」节 + `knowledge/devflow/page-architecture-spec.md`）。
+   页内弹窗（`div.window`/`div.modal`）不是页，写在该 `.screen` 内部即可。
 
 ## ⚠️ 切图 / 图片资源铁律（2026-08-29 羊了个羊实战教训）
 1. **图片尺寸必须与 json 控件尺寸一致**（瓦片 76×76 控件 → 76×76 图；槽位 72×72 → 72×72 图），
@@ -302,7 +417,11 @@ iconfont class），转换器**自动生成 iconfont 风格矢量线框 PNG**（
 ```bash
 # html → json（默认输出同名 .json）
 python tools/ui_tools/html2json.py ui/main.html ui/main.json
-# json → html 预览（客户确认稿）
+# 多屏 HTML（多个 div.screen）→ 缺省每屏一个 json（文件名取 data-page）
+python tools/ui_tools/html2json.py ui/main.html ui/
+# 只有「同属一个 Activity 的多个整屏 window」才合并成一个 json
+python tools/ui_tools/html2json.py ui/main.html ui/main.json --merge-windows
+# json → html 预览（客户确认稿；多整屏 window 工程自带页面切换条 + #window__N 直达）
 python tools/ui_tools/json2html.py <项目根目录或json路径>
 # 全检（通用，参数化项目路径，不随项目复制）
 python tools/ui_tools/check_all.py <项目根目录>

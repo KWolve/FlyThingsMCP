@@ -1,5 +1,23 @@
+---
+id: hardware-hardware-models
+title: 硬件型号库（平台 → 型号 → 规格/预设参数）
+category: hardware
+status: verified
+confidence: offline
+verified_at: 2026-09-29
+machine_verified_at: 2026-09-29
+stale_days: 365
+origin: total
+source: scripts/gen_hardware_doc.py（由 hardware_catalog.json 派生）
+needs_evidence: false
+platforms: []
+tags: [硬件, 型号库, 平台, 分辨率, 规格, 主控]
+evidence:
+  - {kind: offline, cmd: python -m unittest discover -s tests -p test_hardware_catalog.py -q, expect_rc: 0, expect_contains: OK}
+---
 # 硬件型号库（平台 → 型号 → 规格 / 预设参数）
 
+> 检索导引：问「这块板什么分辨率/按键值/接口 / SW 型号怎么读（SW80480070D1 等）/ SV50PD·86 盒·价签规格 / 没给型号能不能开工」→ 本文（机读查询用 `flythings_hardware_info`；本页由生成器产出勿手改）。
 > 检索关键词：型号 / 硬件 / 平台型号 / 屏幕分辨率 / 按键值 / PocketDisplay4 / SW80480070D / SV50PD / 86盒 / 串口屏 / 价签 / 选型
 > 用法：**有具体型号** → 按该型号的预设参数开工（平台/分辨率/按键直接照抄）；**没有具体型号** → 确认平台 + 分辨率即可建工程，其余按需再问。
 > 本文档由 `scripts/gen_hardware_doc.py` 从 `hardware_catalog.json` 生成，**勿手改**（改 json 后重跑生成器 + `rebuild_index_local.py`）。
@@ -25,7 +43,19 @@
 ## V85X
 
 - 平台定位：全志 V85x 系列（A7，视频编码 1080p）——摄像头/DVR/手持便携类产品常用
-- 常见主控：V553 / V851S / V851S3 / V853
+- 常见主控：V553 / V851 / V851S / V851S3 / V853 / V853S
+- 主控→平台/包键（写死口径）：V85x 家族（V553 / V851 / V851S / V851S3 / V853 / V853S）在 MCP 里**统一归一到 V85X 平台**（入参写 V851S/V853S 等也会 resolve 成 V85X）：包键走 `v85x`（SPINOR）/ `v85xemmc`（EMMC），**芯片名（如 v851s）不是平台键** —— 拿去查包会查空（v0.27.87 收拢）。
+- 主控 V553：主控 SoC（全志 V85x 系列）；数据状态=partial。
+- 主控 V851：主控 SoC（全志 V85x 系列）；数据状态=partial。真机实测（Zkswe_V85X_SPINOR，480×800 / 640×480）：图层释放判据按 ch/layer 跳 UI 层、硬件 H264 解码验收、触控轴待确认
+  - 依据：仓库实测记录：knowledge/v85x/display-layer-debug.md §2-1-2、demos/h264-player-v85x/README.md
+- 主控 V851S：主控 SoC（全志 V85x 系列）；别名 V851s；数据状态=partial。真机实测（学习机 PocketGame 480×800）：触摸轴 /dev/input/event4 + MT-B、H264 缩放解码内存档位（56MB 内存）；CPU/内存/存储完整规格**待确认**
+  - 依据：仓库实测记录：knowledge/devflow/touch-inject-autotest.md §4、knowledge/v85x/h264-player-usage.md §5
+- 主控 V851S3：主控 SoC（全志 V85x 系列）；数据状态=pending。仅登记型号（package_catalog 的 v85x/v85xemmc chips + 官方系列名）——**没有实测数据，所有规格待确认**（不按同系列外推）
+  - 依据：package_catalog.json（v85x/v85xemmc chips）
+- 主控 V853：主控 SoC（全志 V85x 系列）；数据状态=partial。
+  - 依据：仓库记录：knowledge/v85x/dvr-recorder-guide.md、demos/dvr-uvc-recorder-v85x/README.md
+- 主控 V853S：主控 SoC（全志 V85x 系列）；数据状态=pending。仅登记型号（package_catalog 的 v85x/v85xemmc chips）——**没有实测数据，所有规格待确认**（不按同系列外推）
+  - 依据：package_catalog.json（v85x/v85xemmc chips）
 - 平台默认参数：tfcardFormat=FAT32 + 64KB 簇（OEM=zkswe）——录制类必查，电脑格的卡判不符；displayLayer=UI 层要留 visible:true 的 videoView 透明窗，视频层才透得出
 - 可选补充（非阻塞）：平台差异化说明（沛哥将补充：与 Z21/V853 等在屏幕方向、按键、TF 卡格式等方面的差异；有了就不用每次核查）
 
@@ -65,8 +95,15 @@
 - 供电：AC 220V / DC 9-24V
 - OTA：支持
 - 开机：3 秒
-- **默认参数（开发直接照抄）**：uartDefaultBaud=115200；upgrade=U 盘 / TF 卡升级；resolution=480x480 / 720x720；voice=内嵌在线语音 SDK + 双麦硬件降噪；relay=最多 3 路（10A）；wired=RS485 + 百兆以太网；power=AC 220V / DC 9-24V；boot=3 秒开机
+- **默认参数（开发直接照抄）**：uartDefaultBaud=115200；upgrade=U 盘/TF 卡放 update.img | extupdate.img（+ 无后缀 zkautoupgrade 可自动升级）；或 ADB：setprop sys.zkupgrade.dir <目录> + sys.zkupgrade.flag 255 + setprop ctl.restart zkswe；resolution=480x480 / 720x720；voice=内嵌在线语音 SDK + 双麦硬件降噪；relay=最多 3 路（10A）；wired=RS485 + 百兆以太网；power=AC 220V / DC 9-24V；boot=3 秒开机；resImageFormat=ext4 —— 工程根 package.properties 必须写 release.ext4=true（出包名变 extupdate.img）；dataPartition=/dev/block/mmcblk0p2 → /mnt/sdnand（ext4，由 app 自挂载；挂不上会整盘重建）
+- 资料：`knowledge/hardware/z20-86panel-upgrade.md`
 - 差异·同系列三平台差异：Z6 版 SW48480040B1（ARM9 600MHz，480×480，最低成本）/ Z20 版本型号（1.2GHz+128M DDR3，480×480 或 720×720，带在线语音）/ Z21 版 SW48480040E（1.0GHz，480×480）
+- 差异·固化/升级链路（真机实证 2026-09-23）：升级程序是**系统件**（/lib/libzkupgrade.so + libeasyui 的 UpgradeMonitor + libinternalapp 的 UpgradeActivity + /system/res/internal/zkupgrade.ftu），app 不用自己写升级逻辑。触发三条正路：① 卡/U 盘根目录放 update.img|extupdate.img + 重新上电（弹界面勾选）；② 同目录再放无后缀 zkautoupgrade（默认 2 s 后自动开升；配 zkrebootdelay，-1 = 升完不重启）；③ ADB：setprop sys.zkupgrade.dir <目录> + sys.zkupgrade.flag 255 + setprop ctl.restart zkswe。⚠️ 升级过程中会停 zkswe/wpa_supplicant 等 → 必然掉网；本机真机用 ③ 触发后板卡随即失联（见报告）→ 远程固化前必须先安排现场（能断电、能插卡）。升级库扫描目录：/mnt/usb、/mnt/usb1、/mnt/extsd、/mnt/mmc（另有 uboot 线 /mnt/storage/zkimg/update.img）；去重记录 /data/.zkugraderec。
+- 差异·包格式与机型绑定（官方 wiki 未收录 release.ext4）：包 = 572 字节头部 + payload；头部 0x00 起魔术 "ZKSWEV1.0-180127"，0x1C = payload 字节数，0x35 起 = **机型 magic**（Z20 = Zkswe_SSD20X_SPINOR = 0xaa550404；Z21 = 0xaa550606；V85X = 0xaa550a0a；F133 = 0xaa550707）→ 包不能跨机型刷（库内有 sys_upgrade_type_no_match_error）。payload = **/res 镜像**：默认 squashfs（hsqs 头，小）；工程根 package.properties 写 release.ext4=true 时变 **ext4 镜像**（体积 1 MiB 对齐，例 2~3 MiB；出包时自动安装 make-ext4fs），且**产物文件名变为 extupdate.img** —— 这就是「U 盘 extupdate.img / TF 卡 update.img」包名差异的真正来源。Z20 参考工程 PublicTuyaSwitch 开着 release.ext4 → 本平台按 ext4 出包。
+- 差异·数据面 ext4 分区与系统 res（危险链）：/dev/block/mmcblk0p2 → /mnt/sdnand（ext4，rw,dirsync,nosuid,nodev）由 **app 自己挂载**；挂载失败会 make_ext4fs **整盘重建**（无确认、无备份）→ 现场禁止手动 umount/mkfs/dd 写 p2，要取数据只用 adb pull /mnt/sdnand。mtd3 res（squashfs，本板仅 39 KB 空壳）与 mmcblk0p1 （/mnt/extsd ext4，app 资源/debug 落点）是两处不同的「res 形态」；LOGO/MISC = mtd5 = 128 KB。升级写哪个分区由设备端库内机型表决定：表形状分 3 种（纯 NOR 用 mtd 名 res/backup；纯 eMMC 全 mmcblk0*；NOR+SD NAND 混合型 = res → /dev/block/mmcblk0p1 + mmcblk0p2）。本型号是「16M Flash + 128M SD Nand」→ 属第三种，**推断写入面 = mmcblk0p1（+p2 第二目标）**；真机旁证：/mnt/extsd( = mmcblk0p1) 分区 52.5 MB 而文件系统只有 2.74 MB（df: 2804 个 1K 块）= 典型「小 ext4 镜像写进大分区」形态。⚠️ 仍未直接取证（本次触发后板卡失联）→ 复测后回填。
+- 可选补充（非阻塞，按需补）：固化写入目标分区的正式口径（强推断 = mmcblk0p1(+p2)，见 differences）：真机已触发但板卡失联，待复测钉死
+- 可选补充（非阻塞，按需补）：release.ext4=false（或不写）在本型号的真机后果（未做 true/false 对照）
+- 可选补充（非阻塞，按需补）：release.ext4.size 是否生效（fun.exe 内只有 release.ext4 字面量）
 - 数据来源：4 寸 86 盒系列规格书 V3.0（2025-05-20）
 - 数据状态：complete
 

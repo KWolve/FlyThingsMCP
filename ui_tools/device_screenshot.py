@@ -26,6 +26,16 @@ device_screenshot.py — 从设备真机抓屏，转成 PNG / JPG / BMP 交给 A
     python device_screenshot.py --out D:/shot.png --pixel rgba
     python device_screenshot.py --info                     # 只打印屏幕参数，不抓图
     python device_screenshot.py --device <设备IP>:5555 --name main_page
+
+视频层（SigmaStar Z20/Z21，layer='video'，走 zkshot 从 vdec 输出口取帧）：
+    python device_screenshot.py --layer video                    # vdec chn 0（默认）
+    python device_screenshot.py --layer video --vdec-chn 1       # 拼墙/多路播放器（Z20 拼墙在 chn 1）
+     ⚠️ **通道选错 = 抓不到帧**（这是该工具最常见的失败原因，2026-09-27 实测）：
+     工具默认 chn 0（单路/历史口径）；**SmartPanel 拼墙播放器在 chn 1**（多屏拼接）。
+     ⚠️ Z20 屏保 zkmedia/ssdvideoplayer 是 **FFmpeg 软解、不建 MI VDEC 通道** → chn 0 抽不到帧
+        不一定是工具问题（详见 knowledge/devflow/device-screenshot.md §4.1.1）。
+  失败返回体带 `vdecChn`（实际用的通道号）+ `zkshotCmd` + `hint`（怎么换），不会静默返回空。
+  手工等价命令：`zkshot <out.raw> vdec <chn> 0`。
 """
 
 import argparse
@@ -46,6 +56,7 @@ except Exception:  # pragma: no cover
 # ---------------------------------------------------------------- adb 定位
 
 _ADB_CANDIDATES = [
+    r'tools\adb\adb.exe',                  # 随包 adb（v0.27.84 起）
     r'tools\FlyThingsIDE\sdk\platform-tools\adb\adb.exe',
     r'sim\tools\adb.exe',
     r'sim\tools\platform-tools\adb.exe',
@@ -53,9 +64,51 @@ _ADB_CANDIDATES = [
 ]
 
 
+# ---------------------------------------------------------------- adb 定位（v0.27.84 收口）
+# ⚠️ 本模块不再自己写死 adb 路径：统一走仓库根 `adb_tools.resolve_adb()`，
+#    优先级 = 环境变量 ADB/FLYTHINGS_ADB → **随包 tools/adb/adb.exe** → PATH。
+#    （旧候选表里 sim/、qemu-openwrt/ 那几条本机路径已删；隐私闸门不看这类相对路径，
+#     但它们跟「随包分发」的口径不一致，留着只会漂移）。
+
+_ADB_TOOLS = None
+
+
+def _repo_adb_tools():
+    """向上逐级找仓库根的 adb_tools.py（本文件在 <repo>/ui_tools/ 下）。"""
+    global _ADB_TOOLS
+    if _ADB_TOOLS is not None:
+        return _ADB_TOOLS or None
+    cur = os.path.dirname(os.path.abspath(__file__))
+    for _ in range(4):
+        p = os.path.join(cur, 'adb_tools.py')
+        if os.path.isfile(p):
+            if cur not in sys.path:
+                sys.path.insert(0, cur)
+            try:
+                import importlib
+                _ADB_TOOLS = importlib.import_module('adb_tools')
+            except Exception:
+                _ADB_TOOLS = False
+            return _ADB_TOOLS or None
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    _ADB_TOOLS = False
+    return None
+
+
 def find_adb():
-    """找 adb：环境变量 ADB > PATH > workspace 常见位置（向上逐级找）。返回路径或 None。"""
-    env = os.environ.get('ADB') or os.environ.get('ADB_PATH')
+    """找 adb：adb_tools.resolve_adb()（环境变量 ADB/FLYTHINGS_ADB > 随包 tools/adb/ > PATH）。
+
+    保留旧返回约定（路径或 None），所以调用方与用例（monkeypatch find_adb）无需改。
+    找不到仓库 adb_tools 时（单独拷走本文件用）退化到旧候选表，保证独立可用。
+    """
+    at = _repo_adb_tools()
+    if at is not None:
+        p = at.resolve_adb()
+        return p or None
+    env = os.environ.get('ADB') or os.environ.get('FLYTHINGS_ADB') or os.environ.get('ADB_PATH')
     if env and os.path.isfile(env):
         return env
     w = shutil.which('adb')
@@ -78,6 +131,15 @@ def find_adb():
                 break
             cur = parent
     return None
+
+
+def adb_missing_msg():
+    """找不到 adb 的统一文案（优先用仓库 adb_tools 的口径，保证全仓一句话）。"""
+    at = _repo_adb_tools()
+    if at is not None:
+        return at.adb_missing_hint()
+    return ('找不到 adb：设环境变量 ADB=<adb 完整路径>，或把 adb 放进 PATH，'
+            '或把随包 tools/adb/adb.exe 拷到能找到的位置。')
 
 
 def _run(args, timeout=60, binary=False):
@@ -186,7 +248,7 @@ def screen_info(device='', fb='/dev/fb0', adb=''):
     """读 sysfs 得到可见分辨率 / bpp / stride / virtual。返回 dict（含 raw 每行字节、可见字节数）。"""
     adb = adb or find_adb()
     if not adb:
-        return {'success': False, 'error': '找不到 adb（设环境变量 ADB 或装 Android platform-tools）'}
+        return {'success': False, 'error': adb_missing_msg()}
     dev, err = pick_device(adb, device)
     if not dev:
         return {'success': False, 'error': err}
@@ -562,9 +624,21 @@ def _to_rgba(rows, order):
     return bytes(out)
 
 
+# vdec 通道选错的统一指路文案（视频层抓帧失败时的头号原因）
+VDEC_CHN_HINT = ('vdec 通道选错是多路场景「抓不到视频帧」的头号原因：工具默认 chn 0（单路/历史口径），'
+                 'SmartPanel 拼墙播放器（多屏拼接 h264_player）在 chn 1。换通道重试 vdec_chn=1 / 0；'
+                 '手工等价命令 `zkshot <out.raw> vdec <chn> 0`。注意：Z20 屏保 zkmedia 走 FFmpeg 软解、'
+                 '不建 MI VDEC 通道（chn 0 抽不到帧不一定是工具问题，见 knowledge/devflow/device-screenshot.md §4.1.1）。')
+
+
 def capture_mi_video(device='', out='', fmt='png', scale=1.0, quality=90,
-                     timeout=180, name='', adb=''):
-    """SigmaStar（Z20/Z21）视频层抓帧：zkshot 从 vdec 输出口取一帧 → 本地解码落盘。"""
+                     timeout=180, name='', adb='', vdec_chn=0):
+    """SigmaStar（Z20/Z21）视频层抓帧：zkshot 从**指定 vdec 通道**输出口取一帧 → 本地解码落盘。
+
+    vdec_chn：vdec 通道号（默认 0 —— 与历史行为一致，单路/历史口径）。多路/拼墙必须指定：
+      **chn 1 = SmartPanel 拼墙播放器**（多屏拼接 h264_player）。
+    注：Z20 屏保 zkmedia 走 FFmpeg 软解、**不建 MI VDEC 通道** → chn 0 抽不到帧未必是工具问题。
+    """
     if Image is None:
         return {'success': False, 'error': '缺 Pillow（pip install Pillow），无法解码帧'}
     adb = adb or find_adb()
@@ -579,25 +653,39 @@ def capture_mi_video(device='', out='', fmt='png', scale=1.0, quality=90,
     if not zk:
         return {'success': False, 'method': 'zkshot-vdec', 'warnings': notes,
                 'error': '拿不到 zkshot（设备与本仓都没有可用成品）'}
-    outp = _sh(adb, dev, f'{zk} {remote} vdec 0 0 2>&1', timeout=timeout)
+    try:
+        chn = int(vdec_chn or 0)
+    except Exception:
+        return {'success': False, 'method': 'zkshot-vdec', 'vdecChn': None,
+                'warnings': notes, 'error': 'vdec_chn 必须是整数（收到 %r）' % (vdec_chn,),
+                'hint': VDEC_CHN_HINT}
+    zk_cmd = f'{zk} {remote} vdec {chn} 0'
+    outp = _sh(adb, dev, zk_cmd + ' 2>&1', timeout=timeout)
     m = re.search(r'W=(\d+)\s+H=(\d+)\s+fmt=(-?\d+)\s+stride0=(\d+)', outp or '')
     if not m:
-        notes.append('zkshot 输出无法解析: %s' % (outp or '').replace('\n', ' ')[:160])
-        return {'success': False, 'method': 'zkshot-vdec', 'warnings': notes,
-                'error': 'zkshot 取帧失败（见 warnings）'}
+        notes.append('zkshot 调用: %s' % zk_cmd)
+        notes.append('zkshot 输出无法解析: %s' % (outp or '').replace('\n', ' ')[:200])
+        return {'success': False, 'method': 'zkshot-vdec', 'vdecChn': chn, 'warnings': notes,
+                'device': dev, 'zkshotCmd': zk_cmd,
+                'error': 'zkshot 取帧失败（vdec chn=%d，见 warnings）' % chn,
+                'hint': VDEC_CHN_HINT}
     w, h, fmtv, stride = (int(x) for x in m.groups())
     if w <= 0 or h <= 0:
-        return {'success': False, 'method': 'zkshot-vdec', 'warnings': notes,
-                'error': 'zkshot 取到空帧（app 当前可能没在解码/播放）'}
+        return {'success': False, 'method': 'zkshot-vdec', 'vdecChn': chn, 'warnings': notes,
+                'device': dev, 'zkshotCmd': zk_cmd,
+                'error': 'zkshot 在 vdec chn=%d 取到空帧（该通道当前可能没在解码/播放）' % chn,
+                'hint': VDEC_CHN_HINT}
     rc, _, errs = _run([adb] + (['-s', dev] if dev else []) + ['pull', remote, local_raw], timeout=timeout)
     if rc != 0 or not os.path.isfile(local_raw):
-        return {'success': False, 'method': 'zkshot-vdec', 'warnings': notes,
+        return {'success': False, 'method': 'zkshot-vdec', 'vdecChn': chn, 'warnings': notes,
+                'device': dev, 'zkshotCmd': zk_cmd,
                 'error': 'pull 视频帧失败: %s' % (errs or '')[:200]}
     raw = open(local_raw, 'rb').read()
     try:
         img, conv = decode_frame(raw, w, h, stride, fmtv)
     except Exception as e:
-        return {'success': False, 'method': 'zkshot-vdec', 'warnings': notes,
+        return {'success': False, 'method': 'zkshot-vdec', 'vdecChn': chn, 'warnings': notes,
+                'device': dev, 'zkshotCmd': zk_cmd,
                 'error': '解码失败: %s' % e, 'rawBytes': len(raw),
                 'frame': {'width': w, 'height': h, 'fmt': fmtv, 'stride': stride}}
     if scale and float(scale) != 1.0:
@@ -618,8 +706,9 @@ def capture_mi_video(device='', out='', fmt='png', scale=1.0, quality=90,
     except Exception:
         pass
     return {'success': True, 'path': out, 'width': img.width, 'height': img.height,
-            'method': 'zkshot-vdec', 'frame': {'width': w, 'height': h, 'fmt': fmtv,
-                                               'fmtName': MI_FMT.get(fmtv, str(fmtv)), 'stride': stride},
+            'method': 'zkshot-vdec', 'vdecChn': chn, 'device': dev, 'zkshotCmd': zk_cmd,
+            'frame': {'width': w, 'height': h, 'fmt': fmtv,
+                      'fmtName': MI_FMT.get(fmtv, str(fmtv)), 'stride': stride},
             'pixelOrder': conv, 'rawBytes': len(raw), 'warnings': notes,
             'note': '视频层帧（非整屏）：想叠回 UI 需要读 mi_disp input port attr 拿屏上位置'}
 
@@ -628,7 +717,8 @@ def capture_mi_video(device='', out='', fmt='png', scale=1.0, quality=90,
 
 def capture(device='', out='', fmt='png', scale=1.0, quality=90, fb='/dev/fb0',
             width=0, height=0, pixel='auto', flip='', rotate='auto', offset_y=-1,
-            crop='', layer='ui', timeout=180, keep_raw=False, name='', adb='', _retry=False):
+            crop='', layer='ui', timeout=180, keep_raw=False, name='', adb='',
+            vdec_chn=0, _retry=False):
     """抓设备当前屏 → 本地图片。返回 dict（success/path/尺寸/来源/参数…）。
 
     out      : 输出文件全路径；缺省 screenshots/device_<W>x<H>_<名>_<时间>.<fmt>
@@ -642,17 +732,20 @@ def capture(device='', out='', fmt='png', scale=1.0, quality=90, fb='/dev/fb0',
                —— 方向以设备自己声明的角度为准，不猜、不写死某台设备
     crop     : '' / 'auto' / 'x,y,w,h'。'auto' = 按 /sys/class/disp/disp/attr/sys 里 UI 图层的 frame
                裁出**项目逻辑分辨率**（只对唯一“非全屏尺寸”图层生效，否则不裁并说明）
+    vdec_chn : 仅 layer='video'（SigmaStar）生效：vdec 通道号，**默认 0（向后兼容）**。
+               多路/拼墙必须指定——SmartPanel 拼墙播放器在 **chn 1**（默认 chn 0 = 单路/历史口径）；
+               选错 = 取不到帧（返回体带 vdecChn/zkshotCmd/hint）。
     """
     if Image is None:
         return {'success': False, 'error': '缺 Pillow（pip install Pillow），无法解码 framebuffer'}
-    # 视频层（SigmaStar MI：走 zkshot 从 vdec 输出口取帧）
+    # 视频层（SigmaStar MI：走 zkshot 从 vdec 输出口取帧；vdec_chn 指定通道）
     if str(layer).lower() in ('video', 'mi', 'vdec'):
         return capture_mi_video(device=device, out=out, fmt=fmt, scale=scale, quality=quality,
-                                timeout=timeout, name=name, adb=adb)
+                                timeout=timeout, name=name, adb=adb, vdec_chn=vdec_chn)
     t0 = time.time()
     adb = adb or find_adb()
     if not adb:
-        return {'success': False, 'error': '找不到 adb（设环境变量 ADB 或装 Android platform-tools）'}
+        return {'success': False, 'error': adb_missing_msg()}
     dev, err = pick_device(adb, device)
     if not dev:
         return {'success': False, 'error': err}
@@ -741,10 +834,15 @@ def capture(device='', out='', fmt='png', scale=1.0, quality=90, fb='/dev/fb0',
         except Exception:
             oy2 = None
         if oy2 is not None and oy2 != oy:
+            # ⚠️ 重抓必须**原样带上 crop / layer**（2026-09-20 M6 实测缺陷修复）：
+            # 旧实现漏传 crop → 抓到的是整屏，而返回体里 crop 字段为空，调用方
+            # 以为是「工具不支持/批定无效」，实测复现为「同一参数时而裁时而整屏」
+            # （双缓冲 pan 每次翻页都会触发一次重抓，命中率≈50%）。
             return capture(device=device, out=out, fmt=fmt, scale=scale, quality=quality,
                            fb=fb, width=width, height=height, pixel=pixel, flip=flip,
-                           rotate=rotate, offset_y=-1, timeout=timeout,
-                           keep_raw=keep_raw, name=name, adb=adb, _retry=True)
+                           rotate=rotate, offset_y=-1, timeout=timeout, crop=crop,
+                           layer=layer, keep_raw=keep_raw, name=name, adb=adb,
+                           vdec_chn=vdec_chn, _retry=True)
 
     # ---- 2) 解码
     try:
@@ -840,6 +938,10 @@ def main():
                     help="缺省 auto=读 /sys/class/graphics/fb0/rotate 按设备实际角度转；也可 0/90/180/270")
     ap.add_argument('--crop', default='',
                     help="'' / auto / x,y,w,h；auto=按 disp attr sys 的 UI 图层 frame 裁出项目逻辑分辨率")
+    ap.add_argument('--layer', default='ui',
+                    help="ui（默认，fb0）/ video（SigmaStar 视频层，见 --vdec-chn）")
+    ap.add_argument('--vdec-chn', type=int, default=0,
+                    help="layer=video 时的 vdec 通道号（默认 0；Z20 拼墙在 chn 1、屏保 zkmedia 在 chn 0）")
     ap.add_argument('--keep-raw', action='store_true')
     ap.add_argument('--info', action='store_true', help='只打印屏幕参数，不抓图')
     ap.add_argument('--timeout', type=int, default=180)
@@ -851,7 +953,8 @@ def main():
     r = capture(device=args.device, out=args.out, fmt=args.fmt, scale=args.scale,
                 quality=args.quality, fb=args.fb, width=args.width, height=args.height,
                 pixel=args.pixel, flip=args.flip, rotate=args.rotate, offset_y=args.offset_y,
-                crop=args.crop, timeout=args.timeout, keep_raw=args.keep_raw, name=args.name)
+                crop=args.crop, timeout=args.timeout, keep_raw=args.keep_raw, name=args.name,
+                layer=args.layer, vdec_chn=args.vdec_chn)
     print(json.dumps(r, ensure_ascii=False, indent=2))
     return 0 if r.get('success') else 1
 

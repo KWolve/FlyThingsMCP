@@ -1,5 +1,21 @@
+---
+id: devflow-pixel-analysis-ai
+title: 抓帧读图：程序化像素分析 + 像素级渲染坑
+category: devflow
+status: review
+confidence: manual
+verified_at: 2026-09-29
+stale_days: 180
+origin: total
+source: 2026-09-29 front-matter 迁移（P1：先显式登记"待补可执行判据"）
+needs_evidence: true
+platforms: []
+tags: [2026-09-10 入库, 必要的做好入库就好了]
+evidence: []
+---
 # 抓帧读图：程序化像素分析 + 像素级渲染坑
 
+> 检索导引：问「不烧 token 怎么看截图 / 字符画读图 / 文字暗带检测 / 坐标要不要换算 / 像素级渲染坑怎么验」→ 本文；抓图见 `devflow/device-screenshot.md`，像素 diff 见 `devflow/ui-layout-verify.md`。
 > 2026-09-10 入库（来源：外部 skill `flythings-device-screenshot` 与知识库逐条比对后补缺；
 > 沛哥 2026-09-10 21:31「必要的做好入库就好了」）。适用：拿到设备截图后想**不烧 token** 地读它。
 
@@ -59,6 +75,7 @@
 | 图标边缘发黑/发脏 | 图是**半透明 PNG** 却贴在纯色底上 | **纯色底就烘底**（把底色烘进图）；真需要透明装饰件用 **button + picTab**（alpha 混合正确） |
 | 圆角背景**四角发黑** | 圆角图四角是透明像素，被渲成黑 | 圆角图**四角烘页面底色**（见 nine-patch-rule.md） |
 | listview / item / subItem 出现**黑块** | 填了 `backgroundColor` + `bgColorTab` | **删掉**这两个键 |
+| 浅色形状（浅色带/卡片）边界有**断续暗边/亮白点、圆角发毂齿** | 超采样缩回用了 `LANCZOS`（负瓣振铃）→ 反预乘后 RGB 越界；且低对比边界（只差单通道 12 级）靠肉眼/亮度阈值看不见 | 缩回换**面积平均（AREA/BOX）**，详见 `ui-asset-rules.md` 铁律 #10；用 `tools/qa/aa_audit.py --fail` 验（判 `resid_bad`） |
 
 ## 5. 相关
 

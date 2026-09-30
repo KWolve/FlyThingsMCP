@@ -1,7 +1,24 @@
+---
+id: devflow-device-screenshot
+title: 真机抓屏（device_screenshot）实现要点与踩坑
+category: devflow
+status: review
+confidence: manual
+verified_at: 2026-09-29
+stale_days: 180
+origin: total
+source: 2026-09-29 front-matter 迁移（P1：先显式登记"待补可执行判据"）
+needs_evidence: true
+platforms: [Z20, Z21]
+tags: [fb0 参数, 双缓冲 pan, 视频层抓不到帧, 拼墙抓不到画面, 设备没有 screencap, toast 抓不到, 瞬时元素抓不到, 踩坑细节在这里]
+evidence: []
+---
 # 真机抓屏（device_screenshot）实现要点与踩坑
 
 > 检索导引：抓真机截图 / 抓屏 / 屏幕没图 / 抓到的画面是旧的 / 颜色红蓝互换 / 文字侧躺倒立 /
-> 取图角度 rotateScreen / fb0 参数 / 双缓冲 pan / 设备没有 screencap 时命中。
+> 取图角度 rotateScreen / fb0 参数 / 双缓冲 pan / **vdec 通道 vdec_chn / 视频层抓不到帧 / 拼墙抓不到画面** /
+> 设备没有 screencap / toast 抓不到 / 瞬时元素抓不到 /
+> setInvalid 是禁用不是重绘 / 强制重绘 invalidate 时命中。
 > 用途：`flythings_device_screenshot` 的完整口径（该工具 docstring 只保留要点，踩坑细节在这里）。
 
 ## 1. 什么时候用
@@ -71,15 +88,37 @@
 **对策（按代价从低到高）**：
 1. 抓屏**前后各读一次 `fb0/pan`**（或连抓两次比 md5）：不一致就说明刚好翻页，**重抓**；
 2. 用触摸注入 `touch long <x> <y> 250` 触发一次重绘后再抓；
-3. 代码侧：状态变化时**分两帧 `setInvalid()`**（更稳，见 `touch-inject-autotest.md` 的抓帧时机）；
+3. ⛔ **别拿 `setInvalid()` 当「强制重绘」**（2026-09-17 案例实测踩坑）：
+   `ZKBase::setInvalid(bool)` = 把控件置为**无效状态（禁用）**（`ZK_CONTROL_STATUS_INVALID`）——
+   调了它控件当场**点不动**（可交互控件上发作），现象是「注入坏了 / 界面点哪都没反应」，能白查半天
+   （案例里 13 个导航键被这样禁掉）。**内容变更（`setText` / `setBackgroundPic`）引擎本来就会重绘该控件**，
+   通常什么都不用做；真要手动重绘用 `ZKBase::invalidate()`，但它**在部分设备的旧 `libeasyui.so` 上未导出**
+   （实测 `undefined symbol ...invalidate...` → 整屏黑），用前先确认。详见 `uicontrols/touch-events.md` §6；
 4. 像素 diff 验收（`flythings_ui_visual(action="diff")`）之前**先确认「手里这张是新帧」**，
    否则会把 stale frame 当「改动没生效」，白查一轮应用逻辑。
+
+### 3.3-2 ⚠ 抓帧次数：**瞬态层单抓、静态页/弹窗双抓**（2026-09-17 实测）
+
+3.3-1 的「抓两次取第二张」（连抓两帧比 md5，不一致就重抓）只适用于**静态页面 / 弹窗**这类
+抓的时候还在的画面。**碰到瞬态层（toast 一类，设计寿命约 2s）会把它吃掉**：
+两次抓帧之间的 adb 往返 + 落盘（实测 ≈0.4s 量级）还没来得及抓第二张，弹层已经到点自动关了 →
+得到「toast 没弹出来」的**假 FAIL**（案例实测：slider 页 toast 一批全挂在这上面，改单抓后全过）。
+
+| 对象 | 抓帧次数 | 为什么 |
+|------|----------|--------|
+| 静态页面 / 模态弹窗 / 面板 | **双抓取第二张**（或前后比 `pan`） | 治双缓冲滞后（3.3-1） |
+| 瞬态层：toast / 按压态 / 滚动条 / 逐帧动画中的某一帧 | **单次抓帧**，且**与触发命令放同一次调用** | 寿命短，第二抓必然落空 |
+| 拿不准 | 先按**单抓 + 同调用**做一次，再补双抓 | 保命优先：别把「有」判成「无」 |
+
+判据：瞬态层的验收要**先证明触发了**（日志/像素同时留痕），再谈画面细节；
+只靠「抓两次取第二张」会在寿命 < 抓帧间隔的对象上系统性误判。
 
 **边界（重要）**：
 - 这是**抓图/验收侧的问题，不是应用 bug**，**不要为此改应用逻辑**（不要加无意义的重绘 hack）；
 - `offset_y=-1`（缺省）已按 pan 取值 + 抓后二次确认，但设备在抓图期间翻页仍可能抓到旧帧；
   返回体里的 `screenInfo.pan` / `offsetY` 就是给你自证的；
-- `layer='video'`（SigmaStar）走的是 vdec 输出口，**与 fb0 双缓冲无关**，不适用本条。
+- `layer='video'`（SigmaStar）走的是 vdec 输出口，**与 fb0 双缓冲无关**，不适用本条；
+  多路/拼墙要指定通道 → 见 §4.1.1 `vdec_chn`。
 
 ### 3.4 通道序
 
@@ -130,11 +169,44 @@
 
 ```
 MI_SYS_Init()
-MI_SYS_SetChnOutputPortDepth(vdec chn0 port0, userDepth=1, bufQDepth=2)
+MI_SYS_SetChnOutputPortDepth(vdec chn<N> port0, userDepth=1, bufQDepth=2)
 MI_SYS_ChnOutputPortGetBuf(&port, &info, &h)     // 取一帧
 MI_SYS_Mmap(info.stFrameData.phyAddr[0], size)   // 物理地址映射
 fwrite → Munmap → PutBuf
 ```
+
+#### 4.1.1 通道号 `vdec_chn`（多路/拼墙必读 —— 2026-09-27 补齐）
+
+**症状**：`layer='video'` 抓不到帧（`zkshot` 取帧失败 / 空帧），但屏上确实在播视频。
+交付整机说明书时实测：多屏拼接（`SmartPanel_HA`）的**拼墙播放器在 vdec chn 1**，
+而工具早期把通道**写死成 chn 0** → 只能手工 `zkshot <out.raw> vdec 1 0` 兜。
+
+| vdec 通道 | 谁在用 | 解码方式 |
+|-----------|--------|----------|
+| **chn 0** | 工具**默认值**（单路/历史口径） | — |
+| **chn 1** | **多屏拼接拼墙播放器**（SmartPanel_HA，mi-module `h264_player` 移植版） | 硬件 vdec chn1 |
+
+> ⚠️ **别把「屏保 = chn 0」当真**（早先的说法）：Z20 屏保 `zkmedia`/`ssdvideoplayer` 是 **FFmpeg 软解**、
+> 全设备扫描确认它**不建 MI VDEC 通道**（2026-09-27 反汇编实证：`z20-mi-vdec-channel-attrs.md` §7）——
+> 所以 chn 0 抽不到帧**不一定是工具问题**；「chn 0」只是默认取帧口径。
+
+**怎么用**：`vdec_chn`（int，**默认 0**，向后兼容）仅 `layer='video'` 生效，
+等价命令行 = `zkshot <out.raw> vdec <chn> 0`（`tools/zkshot` 的形参是 `[vdec|disp] [chn] [port]`）：
+
+```
+flythings_device_screenshot(layer='video', vdec_chn=1)                  # 拼墙
+flythings_device_screenshot(layer='video', advanced='{"vdec_chn":1}')  # 或走 advanced
+python ui_tools/device_screenshot.py --layer video --vdec-chn 1         # CLI
+```
+
+**失败必须可诊断**（不要静默返回空）：取帧失败 / 空帧 / pull 失败 / 解码失败这四条路径的返回体里都带
+`vdecChn`（实际用的通道号）、`device`、`zkshotCmd`（还原成命令行，便于肉眼复现）、`hint`（chn 0/1 各是谁、怎么换），
+`warnings[]` 里带 `zkshot` 的原始输出（含它自己打的 `SetChnOutputPortDepth(chn=N ...)` 与 `GetBuf failed: 0x...`）。
+
+**排查顺序**：① 确认 `vdecChn` 就是你期望那路 → ② 换 `vdec_chn` 重试 →
+③ 还是空帧就查该通道上是否真有播放器（`/proc/mi_modules/mi_vdec`；`mi_disp0` 里能看到哪个端口被 `mi_vdec` 绑定）→
+④ 才怀疑 `zkshot` 本身（注意 `zkshot` 跨进程拿别人通道会 `GetBuf failed 0xa009200d` 一类错误；
+`/data/zkshot` 不能当通用 vdec 探针）。
 
 返回体带 `frame{width,height,fmt,fmtName,stride}`，可直接核对（Z20 实测 `384x448 fmt=11 → yuv420sp(NV12)`，
 尺寸与 `384*448*1.5=258048` 对得上）。
@@ -153,6 +225,20 @@ fwrite → Munmap → PutBuf
   （`cat /proc/mi_modules/mi_disp/mi_disp0` 能看到端口被 `mi_vdec` 绑定）—— 当前工具只给**视频帧本身**，不合成。
 - **V85X 不适用**（Allwinner disp 分层，视频层要经 `/dev/disp` ioctl 拿）；Z21 **无硬件解码器**（软解 ffmpeg），沛哥定：暂不处理。
 
+## 4.2 两条实测坑（2026-09-20 M6）
+
+**① `crop` 会被「pan 重抓」分支静默丢掉（已修 v0.27.98）**
+双缓冲设备每次翻页 `pan` 都会变，触发「抓到旧帧 → 重抓一次」的兜底分支；旧实现的递归调用
+**漏传 `crop`/`layer`** → 返回整屏（`crop` 字段为空字符串），表现为「同一个参数时而裁出小块、
+时而给整屏」，命中率≈50%（实测连拍 6 张里 3 张是整屏）。症状很容易被误判成
+「工具不支持 crop」，进而怀疑判据。修法：重抓时原样带上 `crop` / `layer`。
+**自检**：同一 `crop` 连拍 3 张，尺寸与字节数必须完全一致（本机实测 620x248 / 9330B ×3）。
+
+**② `/tmp` 满 → 抓屏报「raw 数据不足…实际 0 字节」**
+抓屏要在设备侧写 `/tmp/.fyshot.bin`；F133(1.182) 的 `/tmp` 是 **123MB tmpfs**，一旦被
+（推前备份目录、测试视频素材等）塞满，`dd | gzip` 就产 0 字节，报错文案是
+「解码失败: raw 数据不足：需要 4096000 字节…实际 0 字节」，**不是**截屏逻辑坏了。
+`df -h /tmp` 看一眼即可确认；腾空间优先删「同盘备份副本」（备份应 tar 回主机或放 `/data`）。
 ## 5. 相关
 
 - 像素级读图/省 token 阶梯、1 字符=1 像素分类图、文字暗带检测 → `pixel-analysis-ai.md`
