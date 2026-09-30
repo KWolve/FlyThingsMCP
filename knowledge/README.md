@@ -7,7 +7,7 @@ confidence: offline
 verified_at: 2026-09-30
 stale_days: 365
 origin: total
-source: 2026-09-30 公开版索引说明（release 同步时生成）
+source: 2026-09-30 公开版索引说明
 platforms: []
 tags: [知识目录, 索引, 公开版, 检索]
 evidence: []

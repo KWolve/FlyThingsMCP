@@ -240,7 +240,7 @@ GROUPS = [
     },
 ]
 
-# 公开版：被裁剪的篇不进检索组（release 同步时保留本守卫）
+# 公开版：仅对磁盘上确实存在的文档做检索组断言
 GROUPS = [g for g in GROUPS if os.path.isfile(os.path.join(BASE, g["doc"]))]
 
 # 对照组：与上面主题无关的其它问法；want 用子串匹配（不要求 top-1）
