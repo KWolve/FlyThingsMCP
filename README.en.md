@@ -20,11 +20,13 @@
 **Option 1: let your AI install it (recommended)** — just tell your AI:
 
 ```
-Clone and install the project at https://gitee.com/Kwolve/flythingsmcp_release
+Clone and install the project at https://github.com/KWolve/FlyThingsMCP
 ```
 
 The AI will clone the repo → install dependencies from `requirements.lock` (a locked, verified
 version set) → guide you through configuration → done.
+
+> **GitHub (primary): `https://github.com/KWolve/FlyThingsMCP`**; China mirror: `https://gitee.com/Kwolve/flythingsmcp_release`
 
 > Requires Python 3.10+. On Windows you can also double-click `install.bat` (installs deps, then runs an
 > offline self-check), or `setup.bat` for an interactive config generator (same as `python configure.py`).
